@@ -40,7 +40,7 @@ BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DUR_S)
 DEVICE_INDEX = None          # set to an index from sd.query_devices() if needed
 
 # Behavior
-HOTKEY = "F9"
+HOTKEY = "F8"
 PASTE_ON_RELEASE = True
 CLIP_SUFFIX = ""             # e.g. " " to auto-space after paste
 
@@ -165,11 +165,24 @@ def start_listening():
         chunks = state.audio_buffer[:]
 
     log("\n[Transcribing] Whisper request sent...")
+
+    audio_duration_s = sum(len(chunk) for chunk in chunks) / SAMPLE_RATE if chunks else 0.0
+    transcribe_start = time.perf_counter()
     final_text = transcribe_with_whisper(chunks).strip()
+    transcribe_end = time.perf_counter()
+
+    transcription_ms = (transcribe_end - transcribe_start) * 1000.0
+    audio_minutes = audio_duration_s / 60.0
+    transcription_minutes = (transcribe_end - transcribe_start) / 60.0
+    total_minutes = audio_minutes + transcription_minutes
+    word_count = len(final_text.split())
+    wpm = word_count / total_minutes if total_minutes > 0 else 0.0
 
     with state.lock:
         state.transcript_final = final_text
         state.is_listening = False
+
+    log(f"[Metrics] Whisper {transcription_ms:.0f} ms | WPM {wpm:.1f} (words={word_count}, audio={audio_duration_s * 1000:.0f} ms)")
 
     if final_text:
         log("\n[Final]:", final_text)
