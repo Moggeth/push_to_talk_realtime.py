@@ -16,9 +16,12 @@ import sys
 import threading
 import time
 import signal
+import platform
+import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
+from typing import Optional, Tuple
 
 import numpy as np
 import sounddevice as sd
@@ -51,6 +54,15 @@ PASTE_ON_RELEASE = True
 CLIP_SUFFIX = ""             # e.g. " " to auto-space after paste
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_LOG_PATH = Path(os.getenv("WORK_LOG_PATH") or (SCRIPT_DIR / "work_log.txt"))
+DEFAULT_DEVICE_LABEL = "System default input"
+STEREO_MIX_SEARCH = os.getenv("STEREO_MIX_SEARCH", "Stereo Mix")
+IS_WINDOWS = platform.system().lower().startswith("win")
+try:
+    USER32 = ctypes.windll.user32 if IS_WINDOWS else None
+    KERNEL32 = ctypes.windll.kernel32 if IS_WINDOWS else None
+except Exception:  # pylint: disable=broad-except
+    USER32 = None
+    KERNEL32 = None
 
 # -------------------- State --------------------
 
@@ -63,6 +75,16 @@ class SessionState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     mode: str = MODE_DICTATION
     active_hotkey: str = ""
+    active_device_label: str = ""
+    dictation_device_index: Optional[int] = DEVICE_INDEX
+    dictation_device_label: str = DEFAULT_DEVICE_LABEL
+    worklog_device_index: Optional[int] = DEVICE_INDEX
+    worklog_device_label: str = DEFAULT_DEVICE_LABEL
+    worklog_default_device_index: Optional[int] = DEVICE_INDEX
+    worklog_default_device_label: str = DEFAULT_DEVICE_LABEL
+    worklog_uses_stereo_mix: bool = False
+    stereo_mix_device_index: Optional[int] = None
+    stereo_mix_device_label: str = ""
 
 state = SessionState()
 
@@ -93,11 +115,140 @@ def append_work_log_entry(text: str):
     else:
         log(f"[Logged] {line}")
 
+
+# -------------------- Audio device helpers --------------------
+
+def describe_device(index: Optional[int]) -> Tuple[str, bool]:
+    if index is None:
+        return DEFAULT_DEVICE_LABEL, True
+    try:
+        device = sd.query_devices(index)
+    except Exception as exc:  # pylint: disable=broad-except
+        log(f"[Audio] Unable to describe device index {index}: {exc}")
+        return f"index {index}", False
+
+    hostapi_name = ""
+    hostapi_index = device.get("hostapi")
+    if isinstance(hostapi_index, int):
+        try:
+            hostapis = sd.query_hostapis()
+            hostapi_name = hostapis[hostapi_index].get("name", "")
+        except Exception:  # pylint: disable=broad-except
+            hostapi_name = ""
+
+    label = device.get("name", f"index {index}")
+    if hostapi_name:
+        label = f"{label} ({hostapi_name})"
+    return label, True
+
+
+def lookup_input_device_by_name(search_term: str) -> Tuple[Optional[int], str]:
+    term = search_term.strip().lower()
+    if not term:
+        return None, ""
+
+    try:
+        devices = sd.query_devices()
+    except Exception as exc:  # pylint: disable=broad-except
+        log(f"[Audio] Unable to query devices: {exc}")
+        return None, ""
+
+    try:
+        hostapis = sd.query_hostapis()
+    except Exception:  # pylint: disable=broad-except
+        hostapis = []
+
+    hostapi_names = {idx: api.get("name", "") for idx, api in enumerate(hostapis)}
+
+    for idx, device in enumerate(devices):
+        if device.get("max_input_channels", 0) <= 0:
+            continue
+        hostapi_index = device.get("hostapi")
+        hostapi_name = hostapi_names.get(hostapi_index, "") if isinstance(hostapi_index, int) else ""
+        label = device.get("name", str(idx))
+        if hostapi_name:
+            label = f"{label} ({hostapi_name})"
+        combined = " ".join(part for part in [device.get("name", ""), hostapi_name] if part)
+        if term in combined.lower():
+            return idx, label
+
+    return None, ""
+
+
+def resolve_device_descriptor(descriptor: str) -> Tuple[Optional[int], str, bool]:
+    descriptor = (descriptor or "").strip()
+    if not descriptor:
+        return None, DEFAULT_DEVICE_LABEL, True
+    if descriptor.isdigit():
+        idx = int(descriptor)
+        label, ok = describe_device(idx)
+        return (idx if ok else None), label, ok
+    idx, label = lookup_input_device_by_name(descriptor)
+    if idx is None:
+        return None, DEFAULT_DEVICE_LABEL, False
+    return idx, label, True
+
+
+def log_device_selection(role: str, index: Optional[int], label: str) -> None:
+    index_text = index if index is not None else "default"
+    log(f"[Audio] {role} device -> {label} (index={index_text})")
+
+
+def initialize_device_state() -> None:
+    fallback_index = DEVICE_INDEX
+    fallback_label = DEFAULT_DEVICE_LABEL
+    if fallback_index is not None:
+        label, ok = describe_device(fallback_index)
+        if ok:
+            fallback_label = label
+        else:
+            log(f"[Audio] DEVICE_INDEX={fallback_index} unavailable; using system default.")
+            fallback_index = None
+            fallback_label = DEFAULT_DEVICE_LABEL
+
+    dictation_descriptor = os.getenv("DICTATION_DEVICE", "").strip()
+    worklog_descriptor = os.getenv("WORKLOG_DEVICE", "").strip()
+
+    dictation_index = fallback_index
+    dictation_label = fallback_label
+    if dictation_descriptor:
+        idx, label, ok = resolve_device_descriptor(dictation_descriptor)
+        if ok:
+            dictation_index, dictation_label = idx, label
+        else:
+            log(f"[Audio] Dictation device '{dictation_descriptor}' not found; using {fallback_label}.")
+
+    worklog_index = dictation_index
+    worklog_label = dictation_label
+    if worklog_descriptor:
+        idx, label, ok = resolve_device_descriptor(worklog_descriptor)
+        if ok:
+            worklog_index, worklog_label = idx, label
+        else:
+            log(f"[Audio] Worklog device '{worklog_descriptor}' not found; using {dictation_label}.")
+
+    state.dictation_device_index = dictation_index
+    state.dictation_device_label = dictation_label
+    state.worklog_default_device_index = dictation_index
+    state.worklog_default_device_label = dictation_label
+    state.worklog_device_index = worklog_index
+    state.worklog_device_label = worklog_label
+    state.worklog_uses_stereo_mix = False
+    state.stereo_mix_device_index = None
+    state.stereo_mix_device_label = ""
+
+    log_device_selection("Dictation", dictation_index, dictation_label)
+    log_device_selection("Worklog", worklog_index, worklog_label)
+
+
 # -------------------- Audio Capture --------------------
 
+initialize_device_state()
+
 class AudioRecorder:
-    def __init__(self):
+    def __init__(self, device_index: Optional[int]):
         self.stream = None
+        self.device_index = device_index
 
     def _callback(self, indata, frames, time_info, status):
         if status:
@@ -113,7 +264,7 @@ class AudioRecorder:
             channels=CHANNELS,
             dtype="float32",
             blocksize=BLOCK_SIZE,
-            device=DEVICE_INDEX,
+            device=self.device_index,
             callback=self._callback,
         )
         self.stream.start()
@@ -161,10 +312,17 @@ def transcribe_with_whisper(chunks: list) -> str:
 
 # -------------------- Orchestration --------------------
 
-def start_listening(mode: str, hotkey_name: str):
+def start_listening(
+    mode: str,
+    hotkey_name: str,
+    device_index: Optional[int],
+    device_label: str,
+):
     if not OPENAI_API_KEY:
         log("ERROR: OPENAI_API_KEY not set.")
         return
+
+    label_text = device_label or DEFAULT_DEVICE_LABEL
 
     with state.lock:
         state.is_listening = True
@@ -173,10 +331,11 @@ def start_listening(mode: str, hotkey_name: str):
         state.audio_buffer.clear()
         state.mode = mode
         state.active_hotkey = hotkey_name
+        state.active_device_label = label_text
 
     label = "Dictate" if mode == MODE_DICTATION else "Log"
-    log(f"\n[Listening-{label}] Hold {hotkey_name}...")
-    recorder = AudioRecorder()
+    log(f"\n[Listening-{label}] Hold {hotkey_name}... (device: {label_text})")
+    recorder = AudioRecorder(device_index=device_index)
     recorder.start()
 
     try:
@@ -209,6 +368,7 @@ def start_listening(mode: str, hotkey_name: str):
         state.transcript_final = final_text
         state.is_listening = False
         state.active_hotkey = ""
+        state.active_device_label = ""
 
     log(f"[Metrics] Whisper {transcription_ms:.0f} ms | WPM {wpm:.1f} (words={word_count}, audio={audio_duration_s * 1000:.0f} ms)")
 
@@ -226,10 +386,72 @@ def start_listening(mode: str, hotkey_name: str):
 
 # -------------------- Hotkey handling --------------------
 
-def on_press(key):
+
+def console_is_foreground() -> bool:
+    if not IS_WINDOWS or USER32 is None or KERNEL32 is None:
+        return True
     try:
-        key_name = key.name.upper()
+        foreground = USER32.GetForegroundWindow()
+        console = KERNEL32.GetConsoleWindow()
+    except Exception:  # pylint: disable=broad-except
+        return True
+    return foreground != 0 and console != 0 and foreground == console
+
+
+def toggle_worklog_stereo_mix() -> None:
+    with state.lock:
+        currently_stereo = state.worklog_uses_stereo_mix
+        default_index = state.worklog_default_device_index
+        default_label = state.worklog_default_device_label
+
+    if currently_stereo:
+        index_text = default_index if default_index is not None else "default"
+        with state.lock:
+            state.worklog_device_index = default_index
+            state.worklog_device_label = default_label
+            state.worklog_uses_stereo_mix = False
+        log(f"[Worklog audio] Reverted to {default_label} (index={index_text}).")
+        return
+
+    idx, label = lookup_input_device_by_name(STEREO_MIX_SEARCH)
+    if idx is None:
+        log(f"[Worklog audio] Stereo mix device matching '{STEREO_MIX_SEARCH}' not found.")
+        return
+
+    with state.lock:
+        state.worklog_device_index = idx
+        state.worklog_device_label = label
+        state.worklog_uses_stereo_mix = True
+        state.stereo_mix_device_index = idx
+        state.stereo_mix_device_label = label
+    log(f"[Worklog audio] Stereo mix enabled -> {label} (index={idx}).")
+
+
+def handle_spacebar_press() -> None:
+    if not console_is_foreground():
+        return
+    with state.lock:
+        if state.is_listening:
+            return
+    toggle_worklog_stereo_mix()
+
+
+def get_key_name(key) -> str:
+    if isinstance(key, pynput_keyboard.KeyCode):
+        return (key.char or "").upper()
+    try:
+        name = key.name
     except AttributeError:
+        return ""
+    return name.upper() if name else ""
+
+def on_press(key):
+    key_name = get_key_name(key)
+    if not key_name:
+        return
+
+    if key_name == "SPACE":
+        handle_spacebar_press()
         return
 
     with state.lock:
@@ -237,22 +459,27 @@ def on_press(key):
             return
 
     if key_name == HOTKEY_DICTATION:
+        with state.lock:
+            device_index = state.dictation_device_index
+            device_label = state.dictation_device_label
         threading.Thread(
             target=start_listening,
-            args=(MODE_DICTATION, HOTKEY_DICTATION),
+            args=(MODE_DICTATION, HOTKEY_DICTATION, device_index, device_label),
             daemon=True,
         ).start()
     elif key_name == HOTKEY_WORKLOG:
+        with state.lock:
+            device_index = state.worklog_device_index
+            device_label = state.worklog_device_label
         threading.Thread(
             target=start_listening,
-            args=(MODE_WORKLOG, HOTKEY_WORKLOG),
+            args=(MODE_WORKLOG, HOTKEY_WORKLOG, device_index, device_label),
             daemon=True,
         ).start()
 
 def on_release(key):
-    try:
-        key_name = key.name.upper()
-    except AttributeError:
+    key_name = get_key_name(key)
+    if not key_name:
         return
 
     with state.lock:
