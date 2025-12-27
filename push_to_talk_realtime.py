@@ -28,6 +28,8 @@ import sounddevice as sd
 from pynput import keyboard as pynput_keyboard
 import pyperclip
 import keyboard  # to send ctrl+v
+import pystray
+from PIL import Image, ImageDraw
 from dotenv import load_dotenv
 
 # -------------------- Configuration --------------------
@@ -51,7 +53,7 @@ MODE_WORKLOG = "worklog"
 HOTKEY_DICTATION = "F8"
 HOTKEY_WORKLOG = "F9"
 PASTE_ON_RELEASE = True
-CLIP_SUFFIX = ""             # e.g. " " to auto-space after paste
+CLIP_SUFFIX = " "            # ensure a trailing space so consecutive dictations flow
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_LOG_PATH = Path(os.getenv("WORK_LOG_PATH") or (SCRIPT_DIR / "work_log.txt"))
 DEFAULT_DEVICE_LABEL = "System default input"
@@ -66,12 +68,13 @@ except Exception:  # pylint: disable=broad-except
 
 # -------------------- State --------------------
 
+TRAY_ICON_SIZE = 64
+
 @dataclass
 class SessionState:
     is_listening: bool = False
     should_stop: bool = False
     transcript_final: str = ""
-    audio_buffer: list = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
     mode: str = MODE_DICTATION
     active_hotkey: str = ""
@@ -85,8 +88,12 @@ class SessionState:
     worklog_uses_stereo_mix: bool = False
     stereo_mix_device_index: Optional[int] = None
     stereo_mix_device_label: str = ""
+    session_counter: int = 0
+    active_session_id: int = 0
 
 state = SessionState()
+shutdown_event = threading.Event()
+keyboard_listener: Optional[pynput_keyboard.Listener] = None
 
 # -------------------- Utilities --------------------
 
@@ -95,9 +102,10 @@ def log(*a):
 
 def paste_text(text: str):
     """Paste text into the active control using clipboard + Ctrl+V."""
-    if not text:
+    if not text or not text.strip():
         return
-    pyperclip.copy(text + CLIP_SUFFIX)
+    prepared = text.rstrip() + CLIP_SUFFIX
+    pyperclip.copy(prepared)
     time.sleep(0.02)
     keyboard.press_and_release("ctrl+v")
 
@@ -117,6 +125,19 @@ def append_work_log_entry(text: str):
 
 
 # -------------------- Audio device helpers --------------------
+
+def start_keyboard_listener() -> None:
+    global keyboard_listener
+    if keyboard_listener is None:
+        keyboard_listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
+        keyboard_listener.start()
+
+
+def stop_keyboard_listener() -> None:
+    global keyboard_listener
+    if keyboard_listener is not None:
+        keyboard_listener.stop()
+        keyboard_listener = None
 
 def describe_device(index: Optional[int]) -> Tuple[str, bool]:
     if index is None:
@@ -246,17 +267,19 @@ def initialize_device_state() -> None:
 initialize_device_state()
 
 class AudioRecorder:
-    def __init__(self, device_index: Optional[int]):
+    def __init__(self, device_index: Optional[int], buffer: list, buffer_lock: threading.Lock):
         self.stream = None
         self.device_index = device_index
+        self.buffer = buffer
+        self.buffer_lock = buffer_lock
 
     def _callback(self, indata, frames, time_info, status):
         if status:
             return
         pcm = np.clip(indata[:, 0], -1.0, 1.0)
         pcm_i16 = (pcm * 32767.0).astype(np.int16)
-        with state.lock:
-            state.audio_buffer.append(pcm_i16.copy())
+        with self.buffer_lock:
+            self.buffer.append(pcm_i16.copy())
 
     def start(self):
         self.stream = sd.InputStream(
@@ -323,32 +346,44 @@ def start_listening(
         return
 
     label_text = device_label or DEFAULT_DEVICE_LABEL
+    record_buffer: list[np.ndarray] = []
+    buffer_lock = threading.Lock()
 
     with state.lock:
+        state.session_counter += 1
+        session_id = state.session_counter
+        state.active_session_id = session_id
         state.is_listening = True
         state.should_stop = False
         state.transcript_final = ""
-        state.audio_buffer.clear()
         state.mode = mode
         state.active_hotkey = hotkey_name
         state.active_device_label = label_text
 
     label = "Dictate" if mode == MODE_DICTATION else "Log"
     log(f"\n[Listening-{label}] Hold {hotkey_name}... (device: {label_text})")
-    recorder = AudioRecorder(device_index=device_index)
+    recorder = AudioRecorder(device_index=device_index, buffer=record_buffer, buffer_lock=buffer_lock)
     recorder.start()
 
     try:
         while True:
             time.sleep(0.02)
             with state.lock:
-                if state.should_stop:
-                    break
+                should_stop = state.should_stop and state.active_session_id == session_id
+            if should_stop:
+                break
     finally:
         recorder.stop()
 
     with state.lock:
-        chunks = state.audio_buffer[:]
+        if state.active_session_id == session_id:
+            state.is_listening = False
+            state.active_hotkey = ""
+            state.active_device_label = ""
+            state.should_stop = False
+
+    with buffer_lock:
+        chunks = [chunk.copy() for chunk in record_buffer]
 
     log("\n[Transcribing] Whisper request sent...")
 
@@ -365,10 +400,8 @@ def start_listening(
     wpm = word_count / total_minutes if total_minutes > 0 else 0.0
 
     with state.lock:
-        state.transcript_final = final_text
-        state.is_listening = False
-        state.active_hotkey = ""
-        state.active_device_label = ""
+        if state.active_session_id == session_id:
+            state.transcript_final = final_text
 
     log(f"[Metrics] Whisper {transcription_ms:.0f} ms | WPM {wpm:.1f} (words={word_count}, audio={audio_duration_s * 1000:.0f} ms)")
 
@@ -488,20 +521,71 @@ def on_release(key):
 
 # -------------------- Main --------------------
 
-def main():
+def ensure_work_log_exists() -> None:
+    try:
+        WORK_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if not WORK_LOG_PATH.exists():
+            WORK_LOG_PATH.touch()
+    except Exception as exc:  # pylint: disable=broad-except
+        log("[Tray] Unable to create work log file:", exc)
+
+
+def open_work_log(_icon=None, _item=None) -> None:
+    ensure_work_log_exists()
+    try:
+        if IS_WINDOWS and hasattr(os, "startfile"):
+            os.startfile(str(WORK_LOG_PATH))  # type: ignore[attr-defined]
+        else:
+            log(f"[Tray] Work log located at {WORK_LOG_PATH}")
+    except Exception as exc:  # pylint: disable=broad-except
+        log("[Tray] Unable to open work log file:", exc)
+
+
+def create_tray_icon_image(size: int = TRAY_ICON_SIZE) -> Image.Image:
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((0, 0, size, size), fill=(49, 130, 206, 255))
+    inset = int(size * 0.28)
+    draw.rectangle((inset, inset, size - inset, size - inset), fill=(255, 255, 255, 255))
+    return image
+
+
+def tray_setup(_icon: pystray.Icon) -> None:
     log(
         f"Push-to-talk ready. Hold {HOTKEY_DICTATION} to dictate/paste, "
-        f"{HOTKEY_WORKLOG} to log work.\nPress Ctrl+C to exit."
+        f"{HOTKEY_WORKLOG} to log work."
     )
-    listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
+    start_keyboard_listener()
+
+
+def tray_exit(icon: pystray.Icon, _item=None) -> None:
+    shutdown_event.set()
+    stop_keyboard_listener()
+    icon.visible = False
+    icon.stop()
+
+
+def main() -> None:
+    menu = pystray.Menu(
+        pystray.MenuItem("Open work log", open_work_log),
+        pystray.MenuItem("Exit", tray_exit),
+    )
+    tray_icon = pystray.Icon(
+        "push_to_talk_realtime",
+        create_tray_icon_image(),
+        "Push-to-talk Whisper",
+        menu,
+    )
 
     try:
-        while True:
-            time.sleep(0.2)
+        tray_icon.run(setup=tray_setup)
     except KeyboardInterrupt:
         log("\nExiting...")
-        os._exit(0)
+        tray_exit(tray_icon)
+    finally:
+        stop_keyboard_listener()
+        shutdown_event.set()
+
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
