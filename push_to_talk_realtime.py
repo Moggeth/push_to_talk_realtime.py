@@ -21,7 +21,7 @@ import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import Optional, Tuple, Protocol, Any
 
 import numpy as np
 import sounddevice as sd
@@ -31,9 +31,6 @@ import keyboard  # to send ctrl+v
 import pystray
 from PIL import Image, ImageDraw
 from dotenv import load_dotenv
-
-if TYPE_CHECKING:
-    from pystray import Icon as PystrayIcon
 
 try:
     import winsound
@@ -90,6 +87,14 @@ TRAY_TITLE = "Push-to-talk Whisper"
 TRAY_COLOR_READY = (46, 160, 67, 255)
 TRAY_COLOR_LISTENING = (220, 53, 69, 255)
 
+class TrayIconLike(Protocol):
+    title: str
+    icon: Any
+    menu: Any
+    visible: bool
+    def update_menu(self) -> None: ...
+    def stop(self) -> None: ...
+
 @dataclass
 class SessionState:
     is_listening: bool = False
@@ -126,7 +131,7 @@ class SessionState:
 state = SessionState()
 shutdown_event = threading.Event()
 keyboard_listener: Optional[pynput_keyboard.Listener] = None
-tray_icon: Optional["PystrayIcon"] = None
+tray_icon: Optional[TrayIconLike] = None
 DEVICE_LIST: list[Tuple[int, str]] = []
 
 # -------------------- Utilities --------------------
@@ -992,7 +997,7 @@ def create_tray_icon_image(
     return image
 
 
-def tray_setup(_icon: "PystrayIcon") -> None:
+def tray_setup(_icon: TrayIconLike) -> None:
     _icon.visible = True  # required when using a custom setup callback
     log(
         f"Push-to-talk ready. {HOTKEY_DICTATION} for dictation/paste, "
@@ -1002,7 +1007,7 @@ def tray_setup(_icon: "PystrayIcon") -> None:
     start_keyboard_listener()
 
 
-def tray_exit(icon: "PystrayIcon", _item=None) -> None:
+def tray_exit(icon: TrayIconLike, _item=None) -> None:
     shutdown_event.set()
     stop_keyboard_listener()
     icon.visible = False
