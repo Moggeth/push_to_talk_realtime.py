@@ -21,7 +21,7 @@ import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 import sounddevice as sd
@@ -31,6 +31,14 @@ import keyboard  # to send ctrl+v
 import pystray
 from PIL import Image, ImageDraw
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from pystray import Icon as PystrayIcon
+
+try:
+    import winsound
+except Exception:  # pylint: disable=broad-except
+    winsound = None
 
 # -------------------- Configuration --------------------
 
@@ -53,7 +61,10 @@ MODE_WORKLOG = "worklog"
 HOTKEY_DICTATION = "F8"
 HOTKEY_WORKLOG = "F9"
 PASTE_ON_RELEASE = True
-CLIP_SUFFIX = " "            # ensure a trailing space so consecutive dictations flow
+SUFFIX_NONE = "none"
+SUFFIX_SPACE = "space"
+SUFFIX_NEWLINE = "newline"
+DEFAULT_SUFFIX_MODE = SUFFIX_SPACE
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_LOG_PATH = Path(os.getenv("WORK_LOG_PATH") or (SCRIPT_DIR / "work_log.txt"))
 DEFAULT_DEVICE_LABEL = "System default input"
@@ -66,13 +77,23 @@ except Exception:  # pylint: disable=broad-except
     USER32 = None
     KERNEL32 = None
 
+MUTE_RMS_THRESHOLD = float(os.getenv("MUTE_RMS_THRESHOLD", "0.01"))
+MUTE_WARNING_AFTER_S = float(os.getenv("MUTE_WARNING_AFTER_S", "1.5"))
+BEEP_START_HZ = 900
+BEEP_STOP_HZ = 600
+BEEP_DURATION_MS = 75
+
 # -------------------- State --------------------
 
 TRAY_ICON_SIZE = 64
+TRAY_TITLE = "Push-to-talk Whisper"
+TRAY_COLOR_READY = (46, 160, 67, 255)
+TRAY_COLOR_LISTENING = (220, 53, 69, 255)
 
 @dataclass
 class SessionState:
     is_listening: bool = False
+    is_transcribing: bool = False
     should_stop: bool = False
     transcript_final: str = ""
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -90,24 +111,82 @@ class SessionState:
     stereo_mix_device_label: str = ""
     session_counter: int = 0
     active_session_id: int = 0
+    beeps_enabled: bool = False
+    tooltip_enabled: bool = False
+    toggle_mode_enabled: bool = False
+    monitor_enabled: bool = False
+    muted_warning: bool = False
+    last_audio_time: float = 0.0
+    last_audio_rms: float = 0.0
+    paste_suffix_mode: str = DEFAULT_SUFFIX_MODE
+    punctuation_terminal: bool = False
+    punctuation_capitalize: bool = False
+    punctuation_normalize_spaces: bool = False
 
 state = SessionState()
 shutdown_event = threading.Event()
 keyboard_listener: Optional[pynput_keyboard.Listener] = None
+tray_icon: Optional["PystrayIcon"] = None
+DEVICE_LIST: list[Tuple[int, str]] = []
 
 # -------------------- Utilities --------------------
 
 def log(*a):
     print(*a, flush=True)
 
+def apply_punctuation_options(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    with state.lock:
+        normalize_spaces = state.punctuation_normalize_spaces
+        capitalize = state.punctuation_capitalize
+        terminal_punct = state.punctuation_terminal
+
+    if normalize_spaces:
+        cleaned = " ".join(cleaned.split())
+
+    if cleaned and capitalize:
+        cleaned = cleaned[0].upper() + cleaned[1:]
+
+    if cleaned and terminal_punct and cleaned[-1] not in ".!?":
+        cleaned += "."
+
+    return cleaned
+
+
+def prepare_clipboard_text(text: str) -> str:
+    cleaned = apply_punctuation_options(text)
+    if not cleaned:
+        return ""
+    with state.lock:
+        suffix_mode = state.paste_suffix_mode
+    if suffix_mode == SUFFIX_NEWLINE:
+        return cleaned + "\n"
+    if suffix_mode == SUFFIX_SPACE:
+        return cleaned + " "
+    return cleaned
+
+
 def paste_text(text: str):
     """Paste text into the active control using clipboard + Ctrl+V."""
-    if not text or not text.strip():
+    prepared = prepare_clipboard_text(text)
+    if not prepared or not prepared.strip():
         return
-    prepared = text.rstrip() + CLIP_SUFFIX
     pyperclip.copy(prepared)
     time.sleep(0.02)
     keyboard.press_and_release("ctrl+v")
+
+
+def maybe_beep(hz: int) -> None:
+    with state.lock:
+        enabled = state.beeps_enabled
+    if not enabled or not IS_WINDOWS or winsound is None:
+        return
+    try:
+        winsound.Beep(hz, BEEP_DURATION_MS)
+    except Exception as exc:  # pylint: disable=broad-except
+        log("[Beep error]", exc)
 
 
 def append_work_log_entry(text: str):
@@ -196,6 +275,34 @@ def lookup_input_device_by_name(search_term: str) -> Tuple[Optional[int], str]:
     return None, ""
 
 
+def refresh_device_list() -> None:
+    global DEVICE_LIST
+    try:
+        devices = sd.query_devices()
+    except Exception as exc:  # pylint: disable=broad-except
+        log(f"[Audio] Unable to query devices: {exc}")
+        DEVICE_LIST = []
+        return
+
+    try:
+        hostapis = sd.query_hostapis()
+    except Exception:  # pylint: disable=broad-except
+        hostapis = []
+
+    hostapi_names = {idx: api.get("name", "") for idx, api in enumerate(hostapis)}
+    listed: list[Tuple[int, str]] = []
+    for idx, device in enumerate(devices):
+        if device.get("max_input_channels", 0) <= 0:
+            continue
+        hostapi_index = device.get("hostapi")
+        hostapi_name = hostapi_names.get(hostapi_index, "") if isinstance(hostapi_index, int) else ""
+        label = device.get("name", str(idx))
+        if hostapi_name:
+            label = f"{label} ({hostapi_name})"
+        listed.append((idx, label))
+    DEVICE_LIST = listed
+
+
 def resolve_device_descriptor(descriptor: str) -> Tuple[Optional[int], str, bool]:
     descriptor = (descriptor or "").strip()
     if not descriptor:
@@ -262,9 +369,36 @@ def initialize_device_state() -> None:
     log_device_selection("Worklog", worklog_index, worklog_label)
 
 
+def is_device_selected(role: str, idx: Optional[int]) -> bool:
+    with state.lock:
+        if role == MODE_DICTATION:
+            return state.dictation_device_index == idx
+        return state.worklog_device_index == idx
+
+
+def set_device_for_role(role: str, idx: Optional[int], label: str) -> None:
+    with state.lock:
+        if role == MODE_DICTATION:
+            state.dictation_device_index = idx
+            state.dictation_device_label = label
+            if state.is_listening and state.mode == MODE_DICTATION:
+                state.active_device_label = label
+        else:
+            state.worklog_default_device_index = idx
+            state.worklog_default_device_label = label
+            state.worklog_device_index = idx
+            state.worklog_device_label = label
+            state.worklog_uses_stereo_mix = False
+            if state.is_listening and state.mode == MODE_WORKLOG:
+                state.active_device_label = label
+    log_device_selection(role.capitalize(), idx, label)
+    refresh_tray_menu()
+
+
 # -------------------- Audio Capture --------------------
 
 initialize_device_state()
+refresh_device_list()
 
 class AudioRecorder:
     def __init__(self, device_index: Optional[int], buffer: list, buffer_lock: threading.Lock):
@@ -277,6 +411,12 @@ class AudioRecorder:
         if status:
             return
         pcm = np.clip(indata[:, 0], -1.0, 1.0)
+        rms = float(np.sqrt(np.mean(pcm * pcm))) if pcm.size else 0.0
+        now = time.monotonic()
+        with state.lock:
+            state.last_audio_rms = rms
+            if rms >= MUTE_RMS_THRESHOLD:
+                state.last_audio_time = now
         pcm_i16 = (pcm * 32767.0).astype(np.int16)
         with self.buffer_lock:
             self.buffer.append(pcm_i16.copy())
@@ -354,26 +494,51 @@ def start_listening(
         session_id = state.session_counter
         state.active_session_id = session_id
         state.is_listening = True
+        state.is_transcribing = False
         state.should_stop = False
         state.transcript_final = ""
+        state.muted_warning = False
+        state.last_audio_time = time.monotonic()
+        state.last_audio_rms = 0.0
         state.mode = mode
         state.active_hotkey = hotkey_name
         state.active_device_label = label_text
+    update_tray_status()
 
+    with state.lock:
+        toggle_mode = state.toggle_mode_enabled
     label = "Dictate" if mode == MODE_DICTATION else "Log"
-    log(f"\n[Listening-{label}] Hold {hotkey_name}... (device: {label_text})")
+    action = "Tap" if toggle_mode else "Hold"
+    log(f"\n[Listening-{label}] {action} {hotkey_name}... (device: {label_text})")
     recorder = AudioRecorder(device_index=device_index, buffer=record_buffer, buffer_lock=buffer_lock)
+    maybe_beep(BEEP_START_HZ)
     recorder.start()
 
     try:
         while True:
             time.sleep(0.02)
             with state.lock:
+                monitor_enabled = state.monitor_enabled
+                last_audio_time = state.last_audio_time
+                muted_warning = state.muted_warning
+            with state.lock:
                 should_stop = state.should_stop and state.active_session_id == session_id
             if should_stop:
                 break
+            if monitor_enabled:
+                idle_s = time.monotonic() - last_audio_time
+                if idle_s >= MUTE_WARNING_AFTER_S and not muted_warning:
+                    with state.lock:
+                        state.muted_warning = True
+                    log("[Audio] You may be muted or too quiet.")
+                    update_tray_status()
+                elif idle_s < MUTE_WARNING_AFTER_S and muted_warning:
+                    with state.lock:
+                        state.muted_warning = False
+                    update_tray_status()
     finally:
         recorder.stop()
+        maybe_beep(BEEP_STOP_HZ)
 
     with state.lock:
         if state.active_session_id == session_id:
@@ -381,15 +546,21 @@ def start_listening(
             state.active_hotkey = ""
             state.active_device_label = ""
             state.should_stop = False
+            state.muted_warning = False
+    update_tray_status()
 
     with buffer_lock:
         chunks = [chunk.copy() for chunk in record_buffer]
 
+    with state.lock:
+        if state.active_session_id == session_id:
+            state.is_transcribing = True
+    update_tray_status()
     log("\n[Transcribing] Whisper request sent...")
 
     audio_duration_s = sum(len(chunk) for chunk in chunks) / SAMPLE_RATE if chunks else 0.0
     transcribe_start = time.perf_counter()
-    final_text = transcribe_with_whisper(chunks).strip()
+    final_text = apply_punctuation_options(transcribe_with_whisper(chunks))
     transcribe_end = time.perf_counter()
 
     transcription_ms = (transcribe_end - transcribe_start) * 1000.0
@@ -402,6 +573,8 @@ def start_listening(
     with state.lock:
         if state.active_session_id == session_id:
             state.transcript_final = final_text
+            state.is_transcribing = False
+    update_tray_status()
 
     log(f"[Metrics] Whisper {transcription_ms:.0f} ms | WPM {wpm:.1f} (words={word_count}, audio={audio_duration_s * 1000:.0f} ms)")
 
@@ -436,6 +609,7 @@ def toggle_worklog_stereo_mix() -> None:
         currently_stereo = state.worklog_uses_stereo_mix
         default_index = state.worklog_default_device_index
         default_label = state.worklog_default_device_label
+        is_active = state.is_listening and state.mode == MODE_WORKLOG
 
     if currently_stereo:
         index_text = default_index if default_index is not None else "default"
@@ -443,7 +617,10 @@ def toggle_worklog_stereo_mix() -> None:
             state.worklog_device_index = default_index
             state.worklog_device_label = default_label
             state.worklog_uses_stereo_mix = False
+            if is_active:
+                state.active_device_label = default_label
         log(f"[Worklog audio] Reverted to {default_label} (index={index_text}).")
+        refresh_tray_menu()
         return
 
     idx, label = lookup_input_device_by_name(STEREO_MIX_SEARCH)
@@ -457,7 +634,10 @@ def toggle_worklog_stereo_mix() -> None:
         state.worklog_uses_stereo_mix = True
         state.stereo_mix_device_index = idx
         state.stereo_mix_device_label = label
+        if is_active:
+            state.active_device_label = label
     log(f"[Worklog audio] Stereo mix enabled -> {label} (index={idx}).")
+    refresh_tray_menu()
 
 
 def handle_spacebar_press() -> None:
@@ -489,6 +669,8 @@ def on_press(key):
 
     with state.lock:
         if state.is_listening:
+            if state.toggle_mode_enabled and key_name == state.active_hotkey:
+                state.should_stop = True
             return
 
     if key_name == HOTKEY_DICTATION:
@@ -516,6 +698,8 @@ def on_release(key):
         return
 
     with state.lock:
+        if state.toggle_mode_enabled:
+            return
         if state.is_listening and key_name == state.active_hotkey:
             state.should_stop = True
 
@@ -541,24 +725,284 @@ def open_work_log(_icon=None, _item=None) -> None:
         log("[Tray] Unable to open work log file:", exc)
 
 
-def create_tray_icon_image(size: int = TRAY_ICON_SIZE) -> Image.Image:
+def update_tray_icon() -> None:
+    if tray_icon is None:
+        return
+    with state.lock:
+        is_listening = state.is_listening
+    color = TRAY_COLOR_LISTENING if is_listening else TRAY_COLOR_READY
+    tray_icon.icon = create_tray_icon_image(color=color)
+
+
+def update_tray_tooltip() -> None:
+    if tray_icon is None:
+        return
+    with state.lock:
+        tooltip_enabled = state.tooltip_enabled
+        is_listening = state.is_listening
+        is_transcribing = state.is_transcribing
+        mode = state.mode
+        device_label = state.active_device_label
+        muted_warning = state.muted_warning
+
+    if not tooltip_enabled:
+        tray_icon.title = TRAY_TITLE
+        return
+
+    status = "Ready"
+    if is_transcribing:
+        status = "Transcribing"
+    elif is_listening:
+        status = "Listening"
+
+    details = []
+    if is_listening or is_transcribing:
+        details.append("Dictation" if mode == MODE_DICTATION else "Worklog")
+        if device_label:
+            details.append(device_label)
+    if muted_warning:
+        details.append("Muted?")
+
+    detail_text = ", ".join(details)
+    if detail_text:
+        tray_icon.title = f"{TRAY_TITLE} - {status} ({detail_text})"
+    else:
+        tray_icon.title = f"{TRAY_TITLE} - {status}"
+
+
+def update_tray_status() -> None:
+    update_tray_tooltip()
+    update_tray_icon()
+
+
+def refresh_tray_menu() -> None:
+    if tray_icon is None:
+        return
+    update_tray_status()
+    if hasattr(tray_icon, "update_menu"):
+        tray_icon.update_menu()
+
+
+def rebuild_tray_menu() -> None:
+    if tray_icon is None:
+        return
+    tray_icon.menu = build_menu()
+    refresh_tray_menu()
+
+def toggle_attr(attr: str) -> None:
+    with state.lock:
+        current = getattr(state, attr)
+        setattr(state, attr, not current)
+    refresh_tray_menu()
+
+
+def set_paste_suffix_mode(mode: str) -> None:
+    with state.lock:
+        state.paste_suffix_mode = mode
+    refresh_tray_menu()
+
+
+def toggle_punctuation_terminal(_icon=None, _item=None) -> None:
+    toggle_attr("punctuation_terminal")
+
+
+def toggle_punctuation_capitalize(_icon=None, _item=None) -> None:
+    toggle_attr("punctuation_capitalize")
+
+
+def toggle_punctuation_normalize(_icon=None, _item=None) -> None:
+    toggle_attr("punctuation_normalize_spaces")
+
+
+def toggle_beeps(_icon=None, _item=None) -> None:
+    toggle_attr("beeps_enabled")
+    with state.lock:
+        enabled = state.beeps_enabled
+    if enabled and (not IS_WINDOWS or winsound is None):
+        log("[Beep] System beeps are unavailable on this platform.")
+
+
+def toggle_tooltip(_icon=None, _item=None) -> None:
+    toggle_attr("tooltip_enabled")
+
+
+def toggle_toggle_mode(_icon=None, _item=None) -> None:
+    toggle_attr("toggle_mode_enabled")
+
+
+def toggle_monitor(_icon=None, _item=None) -> None:
+    with state.lock:
+        state.monitor_enabled = not state.monitor_enabled
+        if state.monitor_enabled:
+            state.last_audio_time = time.monotonic()
+            state.muted_warning = False
+        else:
+            state.muted_warning = False
+    refresh_tray_menu()
+
+
+def apply_default_preset(_icon=None, _item=None) -> None:
+    with state.lock:
+        state.beeps_enabled = False
+        state.tooltip_enabled = False
+        state.toggle_mode_enabled = False
+        state.monitor_enabled = False
+        state.paste_suffix_mode = DEFAULT_SUFFIX_MODE
+        state.punctuation_terminal = False
+        state.punctuation_capitalize = False
+        state.punctuation_normalize_spaces = False
+    refresh_tray_menu()
+
+
+def apply_bells_preset(_icon=None, _item=None) -> None:
+    with state.lock:
+        state.beeps_enabled = True
+        state.tooltip_enabled = True
+        state.monitor_enabled = True
+    refresh_tray_menu()
+
+
+def refresh_audio_devices(_icon=None, _item=None) -> None:
+    refresh_device_list()
+    rebuild_tray_menu()
+
+
+def make_device_action(role: str, idx: Optional[int], label: str):
+    def action(_icon, _item):
+        set_device_for_role(role, idx, label)
+    return action
+
+
+def build_device_menu(role: str) -> pystray.Menu:
+    items = [
+        pystray.MenuItem(
+            DEFAULT_DEVICE_LABEL,
+            make_device_action(role, None, DEFAULT_DEVICE_LABEL),
+            radio=True,
+            checked=lambda _item: is_device_selected(role, None),
+        )
+    ]
+    for idx, label in DEVICE_LIST:
+        items.append(
+            pystray.MenuItem(
+                label,
+                make_device_action(role, idx, label),
+                radio=True,
+                checked=lambda _item, idx=idx: is_device_selected(role, idx),
+            )
+        )
+    if role == MODE_WORKLOG:
+        items.insert(
+            0,
+            pystray.MenuItem(
+                "Toggle Stereo Mix (work log)",
+                toggle_worklog_stereo_mix,
+                checked=lambda _item: state.worklog_uses_stereo_mix,
+            ),
+        )
+    return pystray.Menu(*items)
+
+
+def build_punctuation_menu() -> pystray.Menu:
+    return pystray.Menu(
+        pystray.MenuItem(
+            "Suffix: None",
+            lambda _icon, _item: set_paste_suffix_mode(SUFFIX_NONE),
+            radio=True,
+            checked=lambda _item: state.paste_suffix_mode == SUFFIX_NONE,
+        ),
+        pystray.MenuItem(
+            "Suffix: Space",
+            lambda _icon, _item: set_paste_suffix_mode(SUFFIX_SPACE),
+            radio=True,
+            checked=lambda _item: state.paste_suffix_mode == SUFFIX_SPACE,
+        ),
+        pystray.MenuItem(
+            "Suffix: Newline",
+            lambda _icon, _item: set_paste_suffix_mode(SUFFIX_NEWLINE),
+            radio=True,
+            checked=lambda _item: state.paste_suffix_mode == SUFFIX_NEWLINE,
+        ),
+        pystray.MenuItem(
+            "Ensure terminal punctuation",
+            toggle_punctuation_terminal,
+            checked=lambda _item: state.punctuation_terminal,
+        ),
+        pystray.MenuItem(
+            "Capitalize first letter",
+            toggle_punctuation_capitalize,
+            checked=lambda _item: state.punctuation_capitalize,
+        ),
+        pystray.MenuItem(
+            "Normalize whitespace",
+            toggle_punctuation_normalize,
+            checked=lambda _item: state.punctuation_normalize_spaces,
+        ),
+    )
+
+
+def build_options_menu() -> pystray.Menu:
+    return pystray.Menu(
+        pystray.MenuItem(
+            "Toggle mode (tap to start/stop)",
+            toggle_toggle_mode,
+            checked=lambda _item: state.toggle_mode_enabled,
+        ),
+        pystray.MenuItem(
+            "Beeps",
+            toggle_beeps,
+            checked=lambda _item: state.beeps_enabled,
+        ),
+        pystray.MenuItem(
+            "Status tooltip",
+            toggle_tooltip,
+            checked=lambda _item: state.tooltip_enabled,
+        ),
+        pystray.MenuItem(
+            "Mute monitor",
+            toggle_monitor,
+            checked=lambda _item: state.monitor_enabled,
+        ),
+    )
+
+
+def build_menu() -> pystray.Menu:
+    return pystray.Menu(
+        pystray.MenuItem("Default (no frills)", apply_default_preset),
+        pystray.MenuItem("Bells and whistles", apply_bells_preset),
+        pystray.MenuItem("Options", build_options_menu()),
+        pystray.MenuItem("Punctuation", build_punctuation_menu()),
+        pystray.MenuItem("Dictation input device", build_device_menu(MODE_DICTATION)),
+        pystray.MenuItem("Work log input device", build_device_menu(MODE_WORKLOG)),
+        pystray.MenuItem("Refresh audio devices", refresh_audio_devices),
+        pystray.MenuItem("Open work log", open_work_log),
+        pystray.MenuItem("Exit", tray_exit),
+    )
+
+
+def create_tray_icon_image(
+    size: int = TRAY_ICON_SIZE,
+    color: Tuple[int, int, int, int] = TRAY_COLOR_READY,
+) -> Image.Image:
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
-    draw.ellipse((0, 0, size, size), fill=(49, 130, 206, 255))
+    draw.ellipse((0, 0, size, size), fill=color)
     inset = int(size * 0.28)
     draw.rectangle((inset, inset, size - inset, size - inset), fill=(255, 255, 255, 255))
     return image
 
 
-def tray_setup(_icon: pystray.Icon) -> None:
+def tray_setup(_icon: "PystrayIcon") -> None:
+    _icon.visible = True  # required when using a custom setup callback
     log(
-        f"Push-to-talk ready. Hold {HOTKEY_DICTATION} to dictate/paste, "
-        f"{HOTKEY_WORKLOG} to log work."
+        f"Push-to-talk ready. {HOTKEY_DICTATION} for dictation/paste, "
+        f"{HOTKEY_WORKLOG} for work log."
     )
+    refresh_tray_menu()
     start_keyboard_listener()
 
 
-def tray_exit(icon: pystray.Icon, _item=None) -> None:
+def tray_exit(icon: "PystrayIcon", _item=None) -> None:
     shutdown_event.set()
     stop_keyboard_listener()
     icon.visible = False
@@ -566,15 +1010,13 @@ def tray_exit(icon: pystray.Icon, _item=None) -> None:
 
 
 def main() -> None:
-    menu = pystray.Menu(
-        pystray.MenuItem("Open work log", open_work_log),
-        pystray.MenuItem("Exit", tray_exit),
-    )
+    global tray_icon
+    refresh_device_list()
     tray_icon = pystray.Icon(
         "push_to_talk_realtime",
         create_tray_icon_image(),
-        "Push-to-talk Whisper",
-        menu,
+        TRAY_TITLE,
+        build_menu(),
     )
 
     try:
