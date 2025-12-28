@@ -27,8 +27,8 @@ Tray Menu
 - Default (no frills): reset QoL options to the original behavior.
 - Bells and whistles: enable beeps, status tooltip, and mute monitor.
 - Options:
-  - Toggle mode: tap the hotkey once to start, tap again to stop.
-  - Beeps: sound on start/stop (Windows only).
+- Toggle mode: tap the hotkey once to start, tap again to stop.
+- Beeps: playful two-tone sound on start/stop (Windows only).
   - Status tooltip: shows Ready/Listening/Transcribing + device + mute hint.
   - Mute monitor: warns if you start recording but the mic stays silent.
 - Punctuation:

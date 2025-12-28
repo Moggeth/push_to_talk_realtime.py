@@ -80,9 +80,8 @@ except Exception:  # pylint: disable=broad-except
 
 MUTE_RMS_THRESHOLD = float(os.getenv("MUTE_RMS_THRESHOLD", "0.01"))
 MUTE_WARNING_AFTER_S = float(os.getenv("MUTE_WARNING_AFTER_S", "1.5"))
-BEEP_START_HZ = 900
-BEEP_STOP_HZ = 600
-BEEP_DURATION_MS = 75
+BEEP_START_PATTERN = [(784, 60), (1175, 60)]
+BEEP_STOP_PATTERN = [(659, 70), (494, 90)]
 
 # -------------------- State --------------------
 
@@ -181,13 +180,14 @@ def paste_text(text: str):
     keyboard.press_and_release("ctrl+v")
 
 
-def maybe_beep(hz: int) -> None:
+def maybe_beep(pattern: list[tuple[int, int]]) -> None:
     with state.lock:
         enabled = state.beeps_enabled
     if not enabled or not IS_WINDOWS or winsound is None:
         return
     try:
-        winsound.Beep(hz, BEEP_DURATION_MS)
+        for hz, duration_ms in pattern:
+            winsound.Beep(hz, duration_ms)
     except Exception as exc:  # pylint: disable=broad-except
         log("[Beep error]", exc)
 
@@ -514,7 +514,7 @@ def start_listening(
     action = "Tap" if toggle_mode else "Hold"
     log(f"\n[Listening-{label}] {action} {hotkey_name}... (device: {label_text})")
     recorder = AudioRecorder(device_index=device_index, buffer=record_buffer, buffer_lock=buffer_lock)
-    maybe_beep(BEEP_START_HZ)
+    maybe_beep(BEEP_START_PATTERN)
     recorder.start()
 
     try:
@@ -541,7 +541,7 @@ def start_listening(
                     update_tray_status()
     finally:
         recorder.stop()
-        maybe_beep(BEEP_STOP_HZ)
+        maybe_beep(BEEP_STOP_PATTERN)
 
     with state.lock:
         if state.active_session_id == session_id:
