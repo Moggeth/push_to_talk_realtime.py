@@ -1,0 +1,12 @@
+{
+  "editor.formatOnSave": true,
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff"
+  },
+  "ruff.lint.run": "onSave",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "-vv",
+    "tests"
+  ]
+}

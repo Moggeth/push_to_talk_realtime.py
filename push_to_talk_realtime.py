@@ -31,6 +31,13 @@ import keyboard  # to send ctrl+v
 import pystray
 from PIL import Image, ImageDraw
 from dotenv import load_dotenv
+from text_processing import (
+    apply_punctuation_options as apply_punctuation_options_core,
+    prepare_clipboard_text as prepare_clipboard_text_core,
+    SUFFIX_NEWLINE,
+    SUFFIX_NONE,
+    SUFFIX_SPACE,
+)
 
 try:
     import winsound
@@ -58,9 +65,6 @@ MODE_WORKLOG = "worklog"
 HOTKEY_DICTATION = "F8"
 HOTKEY_WORKLOG = "F9"
 PASTE_ON_RELEASE = True
-SUFFIX_NONE = "none"
-SUFFIX_SPACE = "space"
-SUFFIX_NEWLINE = "newline"
 DEFAULT_SUFFIX_MODE = SUFFIX_SPACE
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_LOG_PATH = Path(os.getenv("WORK_LOG_PATH") or (SCRIPT_DIR / "work_log.txt"))
@@ -140,37 +144,31 @@ def log(*a):
     print(*a, flush=True)
 
 def apply_punctuation_options(text: str) -> str:
-    if not text:
-        return ""
-    cleaned = text.strip()
     with state.lock:
         normalize_spaces = state.punctuation_normalize_spaces
         capitalize = state.punctuation_capitalize
         terminal_punct = state.punctuation_terminal
-
-    if normalize_spaces:
-        cleaned = " ".join(cleaned.split())
-
-    if cleaned and capitalize:
-        cleaned = cleaned[0].upper() + cleaned[1:]
-
-    if cleaned and terminal_punct and cleaned[-1] not in ".!?":
-        cleaned += "."
-
-    return cleaned
+    return apply_punctuation_options_core(
+        text,
+        normalize_spaces=normalize_spaces,
+        capitalize=capitalize,
+        terminal_punct=terminal_punct,
+    )
 
 
 def prepare_clipboard_text(text: str) -> str:
-    cleaned = apply_punctuation_options(text)
-    if not cleaned:
-        return ""
     with state.lock:
         suffix_mode = state.paste_suffix_mode
-    if suffix_mode == SUFFIX_NEWLINE:
-        return cleaned + "\n"
-    if suffix_mode == SUFFIX_SPACE:
-        return cleaned + " "
-    return cleaned
+        normalize_spaces = state.punctuation_normalize_spaces
+        capitalize = state.punctuation_capitalize
+        terminal_punct = state.punctuation_terminal
+    return prepare_clipboard_text_core(
+        text,
+        suffix_mode=suffix_mode,
+        normalize_spaces=normalize_spaces,
+        capitalize=capitalize,
+        terminal_punct=terminal_punct,
+    )
 
 
 def paste_text(text: str):

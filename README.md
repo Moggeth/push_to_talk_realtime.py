@@ -62,6 +62,17 @@ Run:
 python .\push_to_talk_realtime.py
 ```
 
+Development
+-----------
+Basic checks (see `TESTING.md` for the full, plain-language plan):
+
+```powershell
+ruff check .
+ruff format --check .
+pytest -vv
+```
+CI runs the same commands on push and pull requests via GitHub Actions.
+
 Configuration
 -------------
 Environment variables:
