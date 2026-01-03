@@ -107,3 +107,7 @@ CI runs the same three commands on every push and pull request.
 - While the app is running, unplug and replug the USB mic, then press F8.
 - Expected: no crash; the console logs a retry/fallback message and recording
   continues or exits cleanly if no input device is available.
+
+8) Work log double-tap
+- Double-tap F9 while idle.
+- Expected: `work_log.txt` opens and no new recording starts.

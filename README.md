@@ -20,6 +20,7 @@ Hotkeys
 -------
 - Dictation: `F8`
 - Work log: `F9`
+- Work log: double-tap `F9` to open `work_log.txt`.
 - (Console only) Spacebar: toggle Stereo Mix for the work log input.
 
 Tray Menu

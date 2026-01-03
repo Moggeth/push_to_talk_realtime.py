@@ -66,6 +66,8 @@ HOTKEY_DICTATION = "F8"
 HOTKEY_WORKLOG = "F9"
 PASTE_ON_RELEASE = True
 DEFAULT_SUFFIX_MODE = SUFFIX_SPACE
+WORKLOG_DOUBLE_TAP_WINDOW_S = 0.4
+WORKLOG_TAP_MAX_S = 0.25
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_LOG_PATH = Path(os.getenv("WORK_LOG_PATH") or (SCRIPT_DIR / "work_log.txt"))
 DEFAULT_DEVICE_LABEL = "System default input"
@@ -130,6 +132,9 @@ class SessionState:
     punctuation_terminal: bool = False
     punctuation_capitalize: bool = False
     punctuation_normalize_spaces: bool = False
+    worklog_press_time: float = 0.0
+    last_worklog_tap_time: float = 0.0
+    worklog_double_tap_active: bool = False
 
 state = SessionState()
 shutdown_event = threading.Event()
@@ -756,11 +761,24 @@ def on_press(key):
         handle_spacebar_press()
         return
 
+    double_tap = False
     with state.lock:
         if state.is_listening:
             if state.toggle_mode_enabled and key_name == state.active_hotkey:
                 state.should_stop = True
             return
+        if key_name == HOTKEY_WORKLOG:
+            now = time.monotonic()
+            last_tap = state.last_worklog_tap_time
+            state.worklog_press_time = now
+            if last_tap and (now - last_tap) <= WORKLOG_DOUBLE_TAP_WINDOW_S:
+                state.last_worklog_tap_time = 0.0
+                state.worklog_double_tap_active = True
+                double_tap = True
+
+    if double_tap:
+        open_work_log()
+        return
 
     if key_name == HOTKEY_DICTATION:
         with state.lock:
@@ -785,6 +803,20 @@ def on_release(key):
     key_name = get_key_name(key)
     if not key_name:
         return
+
+    now = time.monotonic()
+    if key_name == HOTKEY_WORKLOG:
+        with state.lock:
+            if state.worklog_double_tap_active:
+                state.worklog_double_tap_active = False
+                state.worklog_press_time = 0.0
+                return
+            press_time = state.worklog_press_time
+            state.worklog_press_time = 0.0
+            if press_time and (now - press_time) <= WORKLOG_TAP_MAX_S:
+                state.last_worklog_tap_time = now
+            else:
+                state.last_worklog_tap_time = 0.0
 
     with state.lock:
         if state.toggle_mode_enabled:
