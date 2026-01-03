@@ -102,3 +102,8 @@ CI runs the same three commands on every push and pull request.
 6) Mute monitor (optional)
 - Enable "Mute monitor", then start recording while silent.
 - Expected: after ~1.5s, a "Muted?" hint appears in the console/tray tooltip.
+
+7) Device hot-swap fallback
+- While the app is running, unplug and replug the USB mic, then press F8.
+- Expected: no crash; the console logs a retry/fallback message and recording
+  continues or exits cleanly if no input device is available.

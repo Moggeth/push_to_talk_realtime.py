@@ -306,6 +306,28 @@ def refresh_device_list() -> None:
     DEVICE_LIST = listed
 
 
+def is_default_input_available() -> bool:
+    try:
+        sd.query_devices(None, "input")
+    except Exception:  # pylint: disable=broad-except
+        return False
+    return True
+
+
+def pick_fallback_input_device(preferred_index: Optional[int]) -> Tuple[Optional[int], str]:
+    refresh_device_list()
+    if preferred_index is None:
+        if DEVICE_LIST:
+            return DEVICE_LIST[0]
+        return None, DEFAULT_DEVICE_LABEL
+    if is_default_input_available():
+        return None, DEFAULT_DEVICE_LABEL
+    for idx, label in DEVICE_LIST:
+        if idx != preferred_index:
+            return idx, label
+    return None, DEFAULT_DEVICE_LABEL
+
+
 def resolve_device_descriptor(descriptor: str) -> Tuple[Optional[int], str, bool]:
     descriptor = (descriptor or "").strip()
     if not descriptor:
@@ -443,6 +465,49 @@ class AudioRecorder:
         finally:
             self.stream = None
 
+
+def start_recorder_with_fallback(
+    recorder: AudioRecorder,
+    role: str,
+    device_label: str,
+    retries: int = 2,
+) -> Tuple[bool, Optional[int], str]:
+    label_text = device_label or DEFAULT_DEVICE_LABEL
+    for attempt in range(retries + 1):
+        index_text = recorder.device_index if recorder.device_index is not None else "default"
+        try:
+            recorder.start()
+            return True, recorder.device_index, label_text
+        except Exception as exc:  # pylint: disable=broad-except
+            log(
+                "[Audio] Unable to start",
+                f"{role} input ({label_text}, index={index_text}): {exc}",
+            )
+            if attempt < retries:
+                time.sleep(0.25)
+                refresh_device_list()
+
+    fallback_index, fallback_label = pick_fallback_input_device(recorder.device_index)
+    fallback_text = fallback_label or DEFAULT_DEVICE_LABEL
+    if fallback_index == recorder.device_index and fallback_text == label_text:
+        return False, recorder.device_index, label_text
+
+    fallback_index_text = fallback_index if fallback_index is not None else "default"
+    log(
+        "[Audio] Retrying",
+        f"{role} input with fallback {fallback_text} (index={fallback_index_text}).",
+    )
+    recorder.device_index = fallback_index
+    try:
+        recorder.start()
+    except Exception as exc:  # pylint: disable=broad-except
+        log(
+            "[Audio] Unable to start fallback",
+            f"{role} input ({fallback_text}, index={fallback_index_text}): {exc}",
+        )
+        return False, fallback_index, fallback_text
+    return True, fallback_index, fallback_text
+
 # -------------------- Whisper transcription --------------------
 
 def transcribe_with_whisper(chunks: list) -> str:
@@ -512,10 +577,31 @@ def start_listening(
         toggle_mode = state.toggle_mode_enabled
     label = "Dictate" if mode == MODE_DICTATION else "Log"
     action = "Tap" if toggle_mode else "Hold"
-    log(f"\n[Listening-{label}] {action} {hotkey_name}... (device: {label_text})")
     recorder = AudioRecorder(device_index=device_index, buffer=record_buffer, buffer_lock=buffer_lock)
+    started, _active_index, active_label = start_recorder_with_fallback(
+        recorder,
+        label,
+        label_text,
+    )
+    if not started:
+        log(f"[Audio] {label} start aborted; no usable input device.")
+        with state.lock:
+            if state.active_session_id == session_id:
+                state.is_listening = False
+                state.active_hotkey = ""
+                state.active_device_label = ""
+                state.should_stop = False
+                state.muted_warning = False
+        update_tray_status()
+        return
+
+    label_text = active_label or DEFAULT_DEVICE_LABEL
+    with state.lock:
+        if state.active_session_id == session_id:
+            state.active_device_label = label_text
+    update_tray_status()
+    log(f"\n[Listening-{label}] {action} {hotkey_name}... (device: {label_text})")
     maybe_beep(BEEP_START_PATTERN)
-    recorder.start()
 
     try:
         while True:

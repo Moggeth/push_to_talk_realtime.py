@@ -91,7 +91,9 @@ Device selection
 Use the tray menu to switch input devices on the fly. For scripted setup, set
 `DICTATION_DEVICE` or `WORKLOG_DEVICE` to a device index or a partial name
 match (case-insensitive). The menu also includes a "Refresh audio devices"
-option.
+option. If a selected device disappears (for example, USB unplug/replug), the
+app retries and falls back to another available input instead of crashing.
+Reselect the desired device after it reconnects.
 
 Notes and tips
 --------------
