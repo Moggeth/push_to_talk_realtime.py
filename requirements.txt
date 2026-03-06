@@ -1,0 +1,8 @@
+numpy
+openai
+Pillow
+pynput
+pyperclip
+pystray
+python-dotenv
+sounddevice

@@ -1,5 +1,5 @@
-Push-to-talk Whisper (Windows)
-==============================
+Push-to-talk Whisper
+====================
 
 Hold a hotkey to record from your microphone, send audio to Whisper, and paste
 the transcript into the active window. A second hotkey logs dictations as
@@ -21,7 +21,7 @@ Hotkeys
 - Dictation: `F8`
 - Work log: `F9`
 - Work log: double-tap `F9` to open `work_log.txt`.
-- (Console only) Spacebar: toggle Stereo Mix for the work log input.
+- (Windows console only) Spacebar: toggle Stereo Mix for the work log input.
 
 Tray Menu
 ---------
@@ -45,10 +45,21 @@ Tray Menu
 
 Setup
 -----
-Install dependencies (example):
+Install dependencies from `requirements.txt`:
 
 ```powershell
-pip install openai sounddevice numpy pynput pyperclip keyboard pystray pillow python-dotenv
+python -m pip install -r requirements.txt
+```
+
+Ubuntu install commands (including system packages needed by audio/tray/clipboard libs):
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip portaudio19-dev libportaudio2 libasound2-dev python3-gi gir1.2-ayatanaappindicator3-0.1 python3-xlib xclip
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
 Create a `.env` file in the same folder:
@@ -98,7 +109,15 @@ Reselect the desired device after it reconnects.
 
 Notes and tips
 --------------
-- If an app blocks paste, run the console as Administrator.
+- Paste uses the standard shortcut for your platform: `Ctrl+V` on Windows/Linux
+  and `Cmd+V` on macOS.
+- On Linux, paste injection does not require the root-only `keyboard` package.
+  If simulated paste fails, the transcript still remains on the clipboard.
+- The global spacebar shortcut for toggling Stereo Mix is disabled on Linux and
+  macOS to avoid intercepting normal typing in other apps. Use the tray menu
+  instead.
+- If a target app blocks simulated paste, trigger paste manually from the
+  clipboard or try running the console with elevated permissions on Windows.
 - The work log is a plain text file (one entry per line).
 - Punctuation options affect both dictation and work log text content.
 - Paste suffix options affect dictation paste only.

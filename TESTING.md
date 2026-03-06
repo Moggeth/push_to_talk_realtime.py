@@ -74,6 +74,32 @@ CI runs the same three commands on every push and pull request.
   - Expected: `""`
   - Logic: empty/whitespace input yields empty output.
 
+- `test_get_paste_modifier_uses_ctrl_on_linux`
+  - Input: `"Linux"`
+  - Expected: `Key.ctrl`
+  - Logic: Linux paste uses `Ctrl+V`, without the root-only `keyboard` package.
+
+- `test_supports_foreground_console_detection_only_on_windows`
+  - Input: `"Windows"`, `"Linux"`, `"Darwin"`
+  - Expected: `True`, `False`, `False`
+  - Logic: the global spacebar shortcut only runs where console foreground
+    detection is actually supported.
+
+- `test_get_paste_modifier_uses_ctrl_on_windows`
+  - Input: `"Windows"`
+  - Expected: `Key.ctrl`
+  - Logic: Windows paste keeps using `Ctrl+V`.
+
+- `test_get_paste_modifier_uses_cmd_on_macos`
+  - Input: `"Darwin"`
+  - Expected: `Key.cmd`
+  - Logic: macOS paste uses `Cmd+V`.
+
+- `test_send_paste_shortcut_presses_modifier_then_v`
+  - Input: fake controller
+  - Expected: modifier pressed, `v` pressed/released, modifier released
+  - Logic: the app sends one paste chord in the right order.
+
 ## Manual tests (audio + tray behavior)
 
 1) Startup
@@ -85,29 +111,40 @@ CI runs the same three commands on every push and pull request.
 - Expected: beep on start/stop (if enabled), a transcript appears, and the text
   pastes into the active app.
 
-3) Multi-sentence spacing (your request)
+3) Linux non-root paste path
+- Run the app as a regular user on Linux, hold F8, speak a short phrase, release.
+- Expected: no `ImportError: You must be root to use this library on linux.`
+- If the target app does not accept simulated paste, expected fallback: the app
+  logs that the transcript stayed on the clipboard instead of crashing.
+
+4) Linux/macOS normal typing does not trigger Stereo Mix lookup
+- Run the app on Linux or macOS, focus another window, and type spaces normally.
+- Expected: no repeated `Stereo mix device matching 'Stereo Mix' not found.`
+  lines in the console.
+
+5) Multi-sentence spacing (your request)
 - Hold F8, speak 3-5 sentences with clear full stops, release.
 - Expected: the pasted text has normal spacing between sentences, and only a
   single trailing space at the very end (no extra spaces at line breaks).
 
-4) Punctuation toggles
+6) Punctuation toggles
 - Toggle "Ensure terminal punctuation", "Capitalize first letter", and
   "Normalize whitespace" from the tray menu.
 - Expected: dictation + work log reflect the settings on the next run.
 
-5) Work log hotkey (F9)
+7) Work log hotkey (F9)
 - Hold F9, speak a short sentence, release.
 - Expected: a new timestamped line appears in `work_log.txt`.
 
-6) Mute monitor (optional)
+8) Mute monitor (optional)
 - Enable "Mute monitor", then start recording while silent.
 - Expected: after ~1.5s, a "Muted?" hint appears in the console/tray tooltip.
 
-7) Device hot-swap fallback
+9) Device hot-swap fallback
 - While the app is running, unplug and replug the USB mic, then press F8.
 - Expected: no crash; the console logs a retry/fallback message and recording
   continues or exits cleanly if no input device is available.
 
-8) Work log double-tap
+10) Work log double-tap
 - Double-tap F9 while idle.
 - Expected: `work_log.txt` opens and no new recording starts.

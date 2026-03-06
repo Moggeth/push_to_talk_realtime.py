@@ -1,42 +1,47 @@
 #!/usr/bin/env python3
 """
-Push-to-talk Whisper transcription (Windows):
+Push-to-talk Whisper transcription:
 - Hold F8 to dictate and paste upon release.
 - Hold F9 to capture audio and log the transcript as a timestamped work entry.
 
 Notes
 -----
 - Captures 16 kHz mono PCM from the default input device (set DEVICE_INDEX if needed).
-- Uses Ctrl+V to paste the final text. Run the console as Administrator if an app blocks paste.
+- Uses Ctrl+V on Windows/Linux and Cmd+V on macOS to paste the final text.
 - Requires OPENAI_API_KEY with Whisper access in the environment or a .env file.
 """
 
+import ctypes
 import os
+import platform
+import signal
 import sys
 import threading
 import time
-import signal
-import platform
-import ctypes
 from dataclasses import dataclass, field
-from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple, Protocol, Any
+from pathlib import Path
+from typing import Any, Protocol
 
 import numpy as np
-import sounddevice as sd
-from pynput import keyboard as pynput_keyboard
 import pyperclip
-import keyboard  # to send ctrl+v
 import pystray
-from PIL import Image, ImageDraw
+import sounddevice as sd
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw
+from pynput import keyboard as pynput_keyboard
+
+from platform_input import send_paste_shortcut, supports_foreground_console_detection
 from text_processing import (
-    apply_punctuation_options as apply_punctuation_options_core,
-    prepare_clipboard_text as prepare_clipboard_text_core,
     SUFFIX_NEWLINE,
     SUFFIX_NONE,
     SUFFIX_SPACE,
+)
+from text_processing import (
+    apply_punctuation_options as apply_punctuation_options_core,
+)
+from text_processing import (
+    prepare_clipboard_text as prepare_clipboard_text_core,
 )
 
 try:
@@ -54,9 +59,9 @@ WHISPER_MODEL = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
 # Audio capture
 SAMPLE_RATE = 16000
 CHANNELS = 1
-BLOCK_DUR_S = 0.04           # 40 ms per audio chunk
+BLOCK_DUR_S = 0.04  # 40 ms per audio chunk
 BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DUR_S)
-DEVICE_INDEX = None          # set to an index from sd.query_devices() if needed
+DEVICE_INDEX = None  # set to an index from sd.query_devices() if needed
 
 # Behavior
 MODE_DICTATION = "dictation"
@@ -92,13 +97,16 @@ TRAY_TITLE = "Push-to-talk Whisper"
 TRAY_COLOR_READY = (46, 160, 67, 255)
 TRAY_COLOR_LISTENING = (220, 53, 69, 255)
 
+
 class TrayIconLike(Protocol):
     title: str
     icon: Any
     menu: Any
     visible: bool
+
     def update_menu(self) -> None: ...
     def stop(self) -> None: ...
+
 
 @dataclass
 class SessionState:
@@ -110,14 +118,14 @@ class SessionState:
     mode: str = MODE_DICTATION
     active_hotkey: str = ""
     active_device_label: str = ""
-    dictation_device_index: Optional[int] = DEVICE_INDEX
+    dictation_device_index: int | None = DEVICE_INDEX
     dictation_device_label: str = DEFAULT_DEVICE_LABEL
-    worklog_device_index: Optional[int] = DEVICE_INDEX
+    worklog_device_index: int | None = DEVICE_INDEX
     worklog_device_label: str = DEFAULT_DEVICE_LABEL
-    worklog_default_device_index: Optional[int] = DEVICE_INDEX
+    worklog_default_device_index: int | None = DEVICE_INDEX
     worklog_default_device_label: str = DEFAULT_DEVICE_LABEL
     worklog_uses_stereo_mix: bool = False
-    stereo_mix_device_index: Optional[int] = None
+    stereo_mix_device_index: int | None = None
     stereo_mix_device_label: str = ""
     session_counter: int = 0
     active_session_id: int = 0
@@ -136,16 +144,19 @@ class SessionState:
     last_worklog_tap_time: float = 0.0
     worklog_double_tap_active: bool = False
 
+
 state = SessionState()
 shutdown_event = threading.Event()
-keyboard_listener: Optional[pynput_keyboard.Listener] = None
-tray_icon: Optional[TrayIconLike] = None
-DEVICE_LIST: list[Tuple[int, str]] = []
+keyboard_listener: pynput_keyboard.Listener | None = None
+tray_icon: TrayIconLike | None = None
+DEVICE_LIST: list[tuple[int, str]] = []
 
 # -------------------- Utilities --------------------
 
+
 def log(*a):
     print(*a, flush=True)
+
 
 def apply_punctuation_options(text: str) -> str:
     with state.lock:
@@ -176,13 +187,19 @@ def prepare_clipboard_text(text: str) -> str:
 
 
 def paste_text(text: str):
-    """Paste text into the active control using clipboard + Ctrl+V."""
+    """Paste text into the active control using clipboard + platform paste chord."""
     prepared = prepare_clipboard_text(text)
     if not prepared or not prepared.strip():
-        return
+        return False
     pyperclip.copy(prepared)
     time.sleep(0.02)
-    keyboard.press_and_release("ctrl+v")
+    try:
+        send_paste_shortcut()
+    except Exception as exc:  # pylint: disable=broad-except
+        log("[Paste error]", exc)
+        log("[Paste error] Clipboard still contains the transcript.")
+        return False
+    return True
 
 
 def maybe_beep(pattern: list[tuple[int, int]]) -> None:
@@ -213,6 +230,7 @@ def append_work_log_entry(text: str):
 
 # -------------------- Audio device helpers --------------------
 
+
 def start_keyboard_listener() -> None:
     global keyboard_listener
     if keyboard_listener is None:
@@ -226,7 +244,8 @@ def stop_keyboard_listener() -> None:
         keyboard_listener.stop()
         keyboard_listener = None
 
-def describe_device(index: Optional[int]) -> Tuple[str, bool]:
+
+def describe_device(index: int | None) -> tuple[str, bool]:
     if index is None:
         return DEFAULT_DEVICE_LABEL, True
     try:
@@ -250,7 +269,7 @@ def describe_device(index: Optional[int]) -> Tuple[str, bool]:
     return label, True
 
 
-def lookup_input_device_by_name(search_term: str) -> Tuple[Optional[int], str]:
+def lookup_input_device_by_name(search_term: str) -> tuple[int | None, str]:
     term = search_term.strip().lower()
     if not term:
         return None, ""
@@ -272,7 +291,9 @@ def lookup_input_device_by_name(search_term: str) -> Tuple[Optional[int], str]:
         if device.get("max_input_channels", 0) <= 0:
             continue
         hostapi_index = device.get("hostapi")
-        hostapi_name = hostapi_names.get(hostapi_index, "") if isinstance(hostapi_index, int) else ""
+        hostapi_name = (
+            hostapi_names.get(hostapi_index, "") if isinstance(hostapi_index, int) else ""
+        )
         label = device.get("name", str(idx))
         if hostapi_name:
             label = f"{label} ({hostapi_name})"
@@ -298,12 +319,14 @@ def refresh_device_list() -> None:
         hostapis = []
 
     hostapi_names = {idx: api.get("name", "") for idx, api in enumerate(hostapis)}
-    listed: list[Tuple[int, str]] = []
+    listed: list[tuple[int, str]] = []
     for idx, device in enumerate(devices):
         if device.get("max_input_channels", 0) <= 0:
             continue
         hostapi_index = device.get("hostapi")
-        hostapi_name = hostapi_names.get(hostapi_index, "") if isinstance(hostapi_index, int) else ""
+        hostapi_name = (
+            hostapi_names.get(hostapi_index, "") if isinstance(hostapi_index, int) else ""
+        )
         label = device.get("name", str(idx))
         if hostapi_name:
             label = f"{label} ({hostapi_name})"
@@ -319,7 +342,7 @@ def is_default_input_available() -> bool:
     return True
 
 
-def pick_fallback_input_device(preferred_index: Optional[int]) -> Tuple[Optional[int], str]:
+def pick_fallback_input_device(preferred_index: int | None) -> tuple[int | None, str]:
     refresh_device_list()
     if preferred_index is None:
         if DEVICE_LIST:
@@ -333,7 +356,7 @@ def pick_fallback_input_device(preferred_index: Optional[int]) -> Tuple[Optional
     return None, DEFAULT_DEVICE_LABEL
 
 
-def resolve_device_descriptor(descriptor: str) -> Tuple[Optional[int], str, bool]:
+def resolve_device_descriptor(descriptor: str) -> tuple[int | None, str, bool]:
     descriptor = (descriptor or "").strip()
     if not descriptor:
         return None, DEFAULT_DEVICE_LABEL, True
@@ -347,7 +370,7 @@ def resolve_device_descriptor(descriptor: str) -> Tuple[Optional[int], str, bool
     return idx, label, True
 
 
-def log_device_selection(role: str, index: Optional[int], label: str) -> None:
+def log_device_selection(role: str, index: int | None, label: str) -> None:
     index_text = index if index is not None else "default"
     log(f"[Audio] {role} device -> {label} (index={index_text})")
 
@@ -374,7 +397,9 @@ def initialize_device_state() -> None:
         if ok:
             dictation_index, dictation_label = idx, label
         else:
-            log(f"[Audio] Dictation device '{dictation_descriptor}' not found; using {fallback_label}.")
+            log(
+                f"[Audio] Dictation device '{dictation_descriptor}' not found; using {fallback_label}."
+            )
 
     worklog_index = dictation_index
     worklog_label = dictation_label
@@ -383,7 +408,9 @@ def initialize_device_state() -> None:
         if ok:
             worklog_index, worklog_label = idx, label
         else:
-            log(f"[Audio] Worklog device '{worklog_descriptor}' not found; using {dictation_label}.")
+            log(
+                f"[Audio] Worklog device '{worklog_descriptor}' not found; using {dictation_label}."
+            )
 
     state.dictation_device_index = dictation_index
     state.dictation_device_label = dictation_label
@@ -399,14 +426,14 @@ def initialize_device_state() -> None:
     log_device_selection("Worklog", worklog_index, worklog_label)
 
 
-def is_device_selected(role: str, idx: Optional[int]) -> bool:
+def is_device_selected(role: str, idx: int | None) -> bool:
     with state.lock:
         if role == MODE_DICTATION:
             return state.dictation_device_index == idx
         return state.worklog_device_index == idx
 
 
-def set_device_for_role(role: str, idx: Optional[int], label: str) -> None:
+def set_device_for_role(role: str, idx: int | None, label: str) -> None:
     with state.lock:
         if role == MODE_DICTATION:
             state.dictation_device_index = idx
@@ -430,8 +457,9 @@ def set_device_for_role(role: str, idx: Optional[int], label: str) -> None:
 initialize_device_state()
 refresh_device_list()
 
+
 class AudioRecorder:
-    def __init__(self, device_index: Optional[int], buffer: list, buffer_lock: threading.Lock):
+    def __init__(self, device_index: int | None, buffer: list, buffer_lock: threading.Lock):
         self.stream = None
         self.device_index = device_index
         self.buffer = buffer
@@ -476,7 +504,7 @@ def start_recorder_with_fallback(
     role: str,
     device_label: str,
     retries: int = 2,
-) -> Tuple[bool, Optional[int], str]:
+) -> tuple[bool, int | None, str]:
     label_text = device_label or DEFAULT_DEVICE_LABEL
     for attempt in range(retries + 1):
         index_text = recorder.device_index if recorder.device_index is not None else "default"
@@ -513,7 +541,9 @@ def start_recorder_with_fallback(
         return False, fallback_index, fallback_text
     return True, fallback_index, fallback_text
 
+
 # -------------------- Whisper transcription --------------------
+
 
 def transcribe_with_whisper(chunks: list) -> str:
     """Send recorded buffer to Whisper; return the transcript or ''."""
@@ -522,6 +552,7 @@ def transcribe_with_whisper(chunks: list) -> str:
     try:
         import io
         import wave
+
         from openai import OpenAI  # pip install openai
 
         client = OpenAI(api_key=OPENAI_API_KEY)
@@ -546,12 +577,14 @@ def transcribe_with_whisper(chunks: list) -> str:
         log("[Whisper error]", exc)
         return ""
 
+
 # -------------------- Orchestration --------------------
+
 
 def start_listening(
     mode: str,
     hotkey_name: str,
-    device_index: Optional[int],
+    device_index: int | None,
     device_label: str,
 ):
     if not OPENAI_API_KEY:
@@ -582,7 +615,9 @@ def start_listening(
         toggle_mode = state.toggle_mode_enabled
     label = "Dictate" if mode == MODE_DICTATION else "Log"
     action = "Tap" if toggle_mode else "Hold"
-    recorder = AudioRecorder(device_index=device_index, buffer=record_buffer, buffer_lock=buffer_lock)
+    recorder = AudioRecorder(
+        device_index=device_index, buffer=record_buffer, buffer_lock=buffer_lock
+    )
     started, _active_index, active_label = start_recorder_with_fallback(
         recorder,
         label,
@@ -670,7 +705,9 @@ def start_listening(
             state.is_transcribing = False
     update_tray_status()
 
-    log(f"[Metrics] Whisper {transcription_ms:.0f} ms | WPM {wpm:.1f} (words={word_count}, audio={audio_duration_s * 1000:.0f} ms)")
+    log(
+        f"[Metrics] Whisper {transcription_ms:.0f} ms | WPM {wpm:.1f} (words={word_count}, audio={audio_duration_s * 1000:.0f} ms)"
+    )
 
     if final_text:
         if mode == MODE_WORKLOG:
@@ -678,8 +715,10 @@ def start_listening(
         else:
             log("\n[Final]:", final_text)
             if PASTE_ON_RELEASE:
-                paste_text(final_text)
-                log("[Pasted] Sent clipboard text to the active window.")
+                if paste_text(final_text):
+                    log("[Pasted] Sent clipboard text to the active window.")
+                else:
+                    log("[Clipboard] Transcript copied, but paste was not sent.")
     else:
         log("\n(No speech captured.)")
 
@@ -688,13 +727,13 @@ def start_listening(
 
 
 def console_is_foreground() -> bool:
-    if not IS_WINDOWS or USER32 is None or KERNEL32 is None:
-        return True
+    if not supports_foreground_console_detection() or USER32 is None or KERNEL32 is None:
+        return False
     try:
         foreground = USER32.GetForegroundWindow()
         console = KERNEL32.GetConsoleWindow()
     except Exception:  # pylint: disable=broad-except
-        return True
+        return False
     return foreground != 0 and console != 0 and foreground == console
 
 
@@ -752,6 +791,7 @@ def get_key_name(key) -> str:
         return ""
     return name.upper() if name else ""
 
+
 def on_press(key):
     key_name = get_key_name(key)
     if not key_name:
@@ -799,6 +839,7 @@ def on_press(key):
             daemon=True,
         ).start()
 
+
 def on_release(key):
     key_name = get_key_name(key)
     if not key_name:
@@ -824,7 +865,9 @@ def on_release(key):
         if state.is_listening and key_name == state.active_hotkey:
             state.should_stop = True
 
+
 # -------------------- Main --------------------
+
 
 def ensure_work_log_exists() -> None:
     try:
@@ -910,6 +953,7 @@ def rebuild_tray_menu() -> None:
     tray_icon.menu = build_menu()
     refresh_tray_menu()
 
+
 def toggle_attr(attr: str) -> None:
     with state.lock:
         current = getattr(state, attr)
@@ -988,9 +1032,10 @@ def refresh_audio_devices(_icon=None, _item=None) -> None:
     rebuild_tray_menu()
 
 
-def make_device_action(role: str, idx: Optional[int], label: str):
+def make_device_action(role: str, idx: int | None, label: str):
     def action(_icon, _item):
         set_device_for_role(role, idx, label)
+
     return action
 
 
@@ -1103,7 +1148,7 @@ def build_menu() -> pystray.Menu:
 
 def create_tray_icon_image(
     size: int = TRAY_ICON_SIZE,
-    color: Tuple[int, int, int, int] = TRAY_COLOR_READY,
+    color: tuple[int, int, int, int] = TRAY_COLOR_READY,
 ) -> Image.Image:
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
