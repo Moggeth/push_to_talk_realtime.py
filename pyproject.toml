@@ -13,3 +13,11 @@ quote-style = "double"
 addopts = "-vv"
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.coverage.run]
+branch = true
+source = ["push_to_talk_realtime", "platform_input", "text_processing"]
+
+[tool.coverage.report]
+fail_under = 70
+show_missing = true

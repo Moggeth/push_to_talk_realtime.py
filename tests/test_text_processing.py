@@ -30,6 +30,10 @@ def test_apply_punctuation_options_keeps_terminal_punct():
     assert result == "Already!"
 
 
+def test_apply_punctuation_options_empty_input():
+    assert apply_punctuation_options("") == ""
+
+
 def test_prepare_clipboard_text_suffix_space_only_at_end():
     text = "First sentence. \nSecond sentence."
     result = prepare_clipboard_text(text, suffix_mode=SUFFIX_SPACE)

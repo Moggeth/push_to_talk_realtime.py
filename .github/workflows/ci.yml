@@ -5,24 +5,62 @@ on:
   pull_request:
 
 jobs:
-  lint-test:
+  quality:
     runs-on: ubuntu-latest
+    env:
+      PYNPUT_BACKEND: dummy
+      PYSTRAY_BACKEND: dummy
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: "pyproject.toml"
-      - name: Install tooling
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff pytest
+          pip install -r requirements.txt pytest pytest-cov ruff
       - name: Ruff format check
         run: ruff format --check .
       - name: Ruff lint
         run: ruff check .
+      - name: Pytest with coverage gate
+        run: pytest -vv --cov=push_to_talk_realtime --cov=platform_input --cov=text_processing --cov-report=term-missing
+
+  compatibility:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.11"
+    env:
+      PYNPUT_BACKEND: dummy
+      PYSTRAY_BACKEND: dummy
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
       - name: Pytest
         run: pytest -vv

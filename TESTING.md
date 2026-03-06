@@ -33,11 +33,30 @@ pytest -vv
 
 Expected result:
 - Each test name shows up as `PASSED`.
-- Final summary looks like `7 passed in X.XXs`.
+- Final summary looks like `77 passed in X.XXs` (or higher as coverage grows).
 
-CI runs the same three commands on every push and pull request.
+4) Coverage gate (matches the Linux CI quality job)
+
+```
+pytest -vv --cov=push_to_talk_realtime --cov=platform_input --cov=text_processing --cov-report=term-missing
+```
+
+Expected result:
+- A coverage table is printed.
+- Total coverage stays at or above `70%`.
+
+CI now runs:
+- A Linux quality job on Python 3.12 for Ruff + the coverage gate.
+- Compatibility pytest jobs on Ubuntu, Windows, and macOS using Python 3.11.
+- Dummy `pynput`/`pystray` backends so headless CI can still import and test the app logic.
 
 ## Unit tests included (what they validate)
+
+- App orchestration and state helpers:
+  - Device descriptor resolution, fallback device picking, and device list refresh.
+  - Clipboard paste flow, work-log append behavior, and tray status updates.
+  - Hotkey press/release state transitions, double-tap work-log handling, and toggle mode stop behavior.
+  - Preset toggles, option toggles, menu builders, tray startup/shutdown, and `main()` bootstrap wiring.
 
 - `test_apply_punctuation_options_normalize_capitalize_terminal`
   - Input: `"  hello   world  "`
@@ -53,6 +72,11 @@ CI runs the same three commands on every push and pull request.
   - Input: `"Already!"`
   - Expected: `"Already!"`
   - Logic: do not add an extra period.
+
+- `test_apply_punctuation_options_empty_input`
+  - Input: `""`
+  - Expected: `""`
+  - Logic: empty input short-circuits cleanly.
 
 - `test_prepare_clipboard_text_suffix_space_only_at_end`
   - Input: `"First sentence. \nSecond sentence."`

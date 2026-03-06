@@ -83,7 +83,20 @@ ruff check .
 ruff format --check .
 pytest -vv
 ```
-CI runs the same commands on push and pull requests via GitHub Actions.
+
+Coverage gate used by CI:
+
+```powershell
+pytest -vv --cov=push_to_talk_realtime --cov=platform_input --cov=text_processing --cov-report=term-missing
+```
+
+GitHub Actions now runs:
+- A Linux quality job on Python 3.12 with Ruff plus a 70% coverage gate.
+- Compatibility test jobs on Ubuntu, Windows, and macOS using Python 3.11.
+
+The test suite is headless-safe in CI by forcing dummy `pynput` and `pystray`
+backends, so the regression checks do not depend on a live tray session or
+audio hardware.
 
 Configuration
 -------------
