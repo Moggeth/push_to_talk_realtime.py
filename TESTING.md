@@ -83,6 +83,11 @@ CI now runs:
   - Expected: `"First sentence.\nSecond sentence. "`
   - Logic: only one trailing space, at the very end.
 
+- `test_prepare_clipboard_text_terminal_punctuation_with_space_suffix`
+  - Input: `"first sentence second sentence"`
+  - Expected: `"first sentence second sentence. "`
+  - Logic: enforce terminal punctuation and keep exactly one trailing space.
+
 - `test_prepare_clipboard_text_suffix_newline`
   - Input: `"Hello"`
   - Expected: `"Hello\n"`
@@ -134,41 +139,63 @@ CI now runs:
 - Hold F8, speak one sentence, release.
 - Expected: beep on start/stop (if enabled), a transcript appears, and the text
   pastes into the active app.
+- While transcription is processing after key release, the tray icon shows a spinning
+  indicator until transcription completes.
 
-3) Linux non-root paste path
+3) Realtime live typing (GPT-4o Realtime)
+- In tray menu, set "Transcription engine" -> "GPT-4o Realtime".
+- Hold F8 and speak 1-2 sentences.
+- Expected: text starts appearing before key release; releasing F8 finalizes punctuation/suffix.
+- Expected: realtime behavior is server-side; no local chunking fallback should appear in logs.
+- Expected: no `invalid_model` websocket errors when using the default realtime websocket URL.
+
+4) Linux non-root paste path
 - Run the app as a regular user on Linux, hold F8, speak a short phrase, release.
 - Expected: no `ImportError: You must be root to use this library on linux.`
 - If the target app does not accept simulated paste, expected fallback: the app
   logs that the transcript stayed on the clipboard instead of crashing.
 
-4) Linux/macOS normal typing does not trigger Stereo Mix lookup
+5) Linux/macOS normal typing does not trigger Stereo Mix lookup
 - Run the app on Linux or macOS, focus another window, and type spaces normally.
 - Expected: no repeated `Stereo mix device matching 'Stereo Mix' not found.`
   lines in the console.
 
-5) Multi-sentence spacing (your request)
+6) Multi-sentence spacing (your request)
 - Hold F8, speak 3-5 sentences with clear full stops, release.
 - Expected: the pasted text has normal spacing between sentences, and only a
   single trailing space at the very end (no extra spaces at line breaks).
 
-6) Punctuation toggles
+7) Punctuation toggles
 - Toggle "Ensure terminal punctuation", "Capitalize first letter", and
   "Normalize whitespace" from the tray menu.
 - Expected: dictation + work log reflect the settings on the next run.
 
-7) Work log hotkey (F9)
-- Hold F9, speak a short sentence, release.
+8) Transcription engine toggle
+- In tray menu, switch "Transcription engine" between Whisper and GPT-4o Realtime.
+- Expected: selected radio item updates immediately and next dictation uses that engine.
+- Expected: when GPT-4o Realtime is active, there is no automatic Whisper fallback.
+
+9) Engine preference persistence
+- Set engine to GPT-4o Realtime, exit app, relaunch app.
+- Expected: tray still shows GPT-4o Realtime selected.
+
+10) Work log hotkey (F9)
+- Hold F9 for at least ~0.25s, speak a short sentence, release.
 - Expected: a new timestamped line appears in `work_log.txt`.
 
-8) Mute monitor (optional)
+11) Mute monitor (optional)
 - Enable "Mute monitor", then start recording while silent.
 - Expected: after ~1.5s, a "Muted?" hint appears in the console/tray tooltip.
 
-9) Device hot-swap fallback
+12) Device hot-swap fallback
 - While the app is running, unplug and replug the USB mic, then press F8.
 - Expected: no crash; the console logs a retry/fallback message and recording
   continues or exits cleanly if no input device is available.
 
-10) Work log double-tap
+13) Work log double-tap
 - Double-tap F9 while idle.
 - Expected: `work_log.txt` opens and no new recording starts.
+
+14) No overlap while transcribing
+- Dictate once with F8, release, then press F8 again before the first transcript finishes.
+- Expected: the second press is ignored until the first transcript completes.

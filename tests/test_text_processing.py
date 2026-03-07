@@ -40,6 +40,16 @@ def test_prepare_clipboard_text_suffix_space_only_at_end():
     assert result == "First sentence.\nSecond sentence. "
 
 
+def test_prepare_clipboard_text_terminal_punctuation_with_space_suffix():
+    text = "first sentence second sentence"
+    result = prepare_clipboard_text(
+        text,
+        suffix_mode=SUFFIX_SPACE,
+        terminal_punct=True,
+    )
+    assert result == "first sentence second sentence. "
+
+
 def test_prepare_clipboard_text_suffix_newline():
     result = prepare_clipboard_text("Hello", suffix_mode=SUFFIX_NEWLINE)
     assert result == "Hello\n"

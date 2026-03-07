@@ -32,3 +32,6 @@ Thumbs.db
 
 # Local runtime artifacts
 work_log.txt
+push_to_talk_realtime.py.py
+__pycache__/push_to_talk_realtime.cpython-313.pyc
+settings.json

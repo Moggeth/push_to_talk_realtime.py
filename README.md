@@ -1,7 +1,7 @@
-Push-to-talk Whisper
-====================
+Push-to-talk Transcription (Windows)
+====================================
 
-Hold a hotkey to record from your microphone, send audio to Whisper, and paste
+Hold a hotkey to record from your microphone, transcribe audio, and paste
 the transcript into the active window. A second hotkey logs dictations as
 timestamped work entries. The app runs from a system tray icon with submenus
 for input device selection, punctuation rules, and QoL toggles.
@@ -10,6 +10,10 @@ Features
 --------
 - Push-to-talk dictation: record and paste on release.
 - Work log capture: record and append a timestamped entry to `work_log.txt`.
+- Transcription engine toggle: choose Whisper or GPT-4o Realtime from the tray menu.
+- Realtime live dictation: GPT-4o Realtime streams server-side transcript deltas while you are still holding the hotkey.
+- Engine preference persistence: selected transcription engine is saved and restored on next launch.
+- Busy tray feedback: tray icon shows a spinner while transcription is in progress.
 - Tray menu controls:
   - Select dictation/worklog input devices (including Stereo Mix).
   - Toggle beeps, status tooltip, tap-to-toggle mode, and mute monitor.
@@ -20,7 +24,7 @@ Hotkeys
 -------
 - Dictation: `F8`
 - Work log: `F9`
-- Work log: double-tap `F9` to open `work_log.txt`.
+- Work log: hold `F9` (more than ~0.25s) to record, or double-tap `F9` to open `work_log.txt`.
 - (Windows console only) Spacebar: toggle Stereo Mix for the work log input.
 
 Tray Menu
@@ -28,13 +32,16 @@ Tray Menu
 - Default (no frills): reset QoL options to the original behavior.
 - Bells and whistles: enable beeps, status tooltip, and mute monitor.
 - Options:
-- Toggle mode: tap the hotkey once to start, tap again to stop.
-- Beeps: playful two-tone sound on start/stop (Windows only).
+  - Toggle mode: tap the hotkey once to start, tap again to stop.
+  - Beeps: playful two-tone sound on start/stop (Windows only).
   - Status tooltip: shows Ready/Listening/Transcribing + device + mute hint.
   - Mute monitor: warns if you start recording but the mic stays silent.
+- Transcription engine:
+  - Whisper: transcribes after key release.
+  - GPT-4o Realtime: strict server-side websocket transcription with server VAD; streams deltas while recording, then finalizes on release.
 - Punctuation:
   - Suffix: None / Space / Newline (affects pasted dictation only).
-  - Ensure terminal punctuation (adds "." if missing).
+  - Ensure terminal punctuation (adds "." if missing; enabled by default).
   - Capitalize first letter.
   - Normalize whitespace.
 - Dictation input device: choose an input device (per-mode).
@@ -102,8 +109,21 @@ Configuration
 -------------
 Environment variables:
 
-- `OPENAI_API_KEY` (required): OpenAI API key with Whisper access.
+- `OPENAI_API_KEY` (required): OpenAI API key with speech-to-text access.
 - `OPENAI_WHISPER_MODEL` (optional): defaults to `whisper-1`.
+- `OPENAI_WHISPER_PROMPT` (optional): punctuation/style hint for Whisper.
+- `TRANSCRIPTION_ENGINE` (optional): `whisper` (default) or `gpt4o_realtime`.
+- `OPENAI_REALTIME_TRANSCRIBE_MODEL` (optional): defaults to `gpt-4o-transcribe`.
+- `OPENAI_REALTIME_SESSION_MODEL` (optional): preferred realtime transcription model override (for example `gpt-4o-transcribe`).
+- `OPENAI_REALTIME_TRANSCRIBE_LANGUAGE` (optional): ISO-639-1 language hint.
+- `OPENAI_REALTIME_TRANSCRIBE_PROMPT` (optional): transcription prompt for realtime mode.
+- `OPENAI_REALTIME_WS_URL` (optional): websocket URL for realtime transcription, default `wss://api.openai.com/v1/realtime?intent=transcription`.
+- `OPENAI_REALTIME_WS_USE_BETA_HEADER` (optional): `0` (default) uses GA websocket headers; set to `1` only if you intentionally need legacy beta header behavior.
+- `REALTIME_LIVE_TYPING` (optional): `1` (default) enables live delta typing for dictation, `0` disables it.
+- `REALTIME_SERVER_VAD_THRESHOLD` (optional): server VAD threshold, default `0.5`.
+- `REALTIME_SERVER_VAD_PREFIX_MS` (optional): server VAD prefix padding in ms, default `300`.
+- `REALTIME_SERVER_VAD_SILENCE_MS` (optional): server VAD silence duration in ms, default `700`.
+- `PUSH_TO_TALK_SETTINGS_PATH` (optional): override path for persisted tray settings (`settings.json` by default).
 - `DICTATION_DEVICE` (optional): device index or name fragment for dictation.
 - `WORKLOG_DEVICE` (optional): device index or name fragment for work log.
 - `WORK_LOG_PATH` (optional): custom path for `work_log.txt`.
@@ -134,5 +154,9 @@ Notes and tips
 - The work log is a plain text file (one entry per line).
 - Punctuation options affect both dictation and work log text content.
 - Paste suffix options affect dictation paste only.
-- Tray icon color: green when idle/transcribing, red while listening.
+- Tray icon color: green when idle, red while listening, and orange + spinner while transcribing.
+- While transcribing, new recordings are ignored until the current transcript finishes.
+- Realtime live typing applies only to dictation mode and may need app focus to stay in the target field.
+- GPT-4o Realtime is hard-switched to server-side mode (no local chunking and no Whisper fallback inside realtime mode).
+- If realtime dependencies are missing, GPT-4o Realtime selection logs an install hint and stays on Whisper.
 - VAD auto-stop and retry queues are not implemented yet.
