@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -320,6 +321,47 @@ def test_append_work_log_entry_writes_timestamped_single_line(monkeypatch, tmp_p
     )
 
 
+def test_apply_persisted_settings_loads_hotkeys_and_engine(monkeypatch, tmp_path: Path):
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "transcription_engine": app.TRANSCRIPTION_ENGINE_GPT4O_REALTIME,
+                "dictation_hotkey": "f15",
+                "worklog_hotkey": "f16",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(app, "HOTKEY_DICTATION", app.DEFAULT_HOTKEY_DICTATION)
+    monkeypatch.setattr(app, "HOTKEY_WORKLOG", app.DEFAULT_HOTKEY_WORKLOG)
+
+    app.apply_persisted_settings()
+
+    assert app.state.transcription_engine == app.TRANSCRIPTION_ENGINE_GPT4O_REALTIME
+    assert app.HOTKEY_DICTATION == "F15"
+    assert app.HOTKEY_WORKLOG == "F16"
+
+
+def test_save_settings_to_disk_includes_hotkeys(monkeypatch, tmp_path: Path):
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(app, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(app, "HOTKEY_DICTATION", "F17")
+    monkeypatch.setattr(app, "HOTKEY_WORKLOG", "F18")
+    with app.state.lock:
+        app.state.transcription_engine = app.TRANSCRIPTION_ENGINE_WHISPER
+
+    app.save_settings_to_disk()
+
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert saved == {
+        "transcription_engine": app.TRANSCRIPTION_ENGINE_WHISPER,
+        "dictation_hotkey": "F17",
+        "worklog_hotkey": "F18",
+    }
+
+
 def test_start_and_stop_keyboard_listener_manage_single_listener(monkeypatch):
     events = []
 
@@ -524,7 +566,9 @@ def test_update_tray_tooltip_includes_status_mode_device_and_muted_warning():
 
     app.update_tray_tooltip()
 
-    assert app.tray_icon.title == (f"{app.TRAY_TITLE} - Listening (Worklog, USB Mic, Muted?)")
+    assert app.tray_icon.title == (
+        f"{app.TRAY_TITLE} - Listening (Worklog, USB Mic, Whisper, Muted?)"
+    )
 
 
 def test_update_tray_tooltip_resets_title_when_disabled():
@@ -692,7 +736,7 @@ def test_on_press_dictation_starts_worker_thread(monkeypatch):
     app.state.dictation_device_index = 4
     app.state.dictation_device_label = "USB Mic"
 
-    app.on_press(make_key("F8"))
+    app.on_press(make_key(app.HOTKEY_DICTATION))
 
     assert len(FakeThread.created) == 1
     created = FakeThread.created[0]
@@ -702,15 +746,55 @@ def test_on_press_dictation_starts_worker_thread(monkeypatch):
     assert created.started is True
 
 
+def test_on_press_shift_dictation_uses_system_audio_device(monkeypatch):
+    monkeypatch.setattr(app.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        app,
+        "resolve_system_audio_input_device",
+        lambda: (17, "Stereo Mix", True),
+    )
+
+    app.on_press(make_key("SHIFT"))
+    app.on_press(make_key(app.HOTKEY_DICTATION))
+
+    assert len(FakeThread.created) == 1
+    created = FakeThread.created[0]
+    assert created.target is app.start_listening
+    assert created.args == (app.MODE_DICTATION, app.HOTKEY_DICTATION, 17, "Stereo Mix")
+
+
+def test_on_press_shift_dictation_skips_when_system_audio_missing(monkeypatch):
+    logs = []
+    monkeypatch.setattr(app.threading, "Thread", FakeThread)
+    monkeypatch.setattr(
+        app,
+        "resolve_system_audio_input_device",
+        lambda: (None, "", False),
+    )
+    monkeypatch.setattr(app, "log", lambda *args: logs.append(" ".join(map(str, args))))
+
+    app.on_press(make_key("SHIFT"))
+    app.on_press(make_key(app.HOTKEY_DICTATION))
+
+    assert FakeThread.created == []
+    assert logs == [
+        (
+            "[Audio] System audio capture unavailable."
+            f" No input device matched '{app.system_audio_search_hint()}'."
+        )
+    ]
+
+
 def test_on_press_worklog_starts_worker_thread(monkeypatch):
     monkeypatch.setattr(app.threading, "Thread", FakeThread)
     app.state.worklog_device_index = 6
     app.state.worklog_device_label = "Loopback"
 
-    app.on_press(make_key("F9"))
+    app.on_press(make_key(app.HOTKEY_WORKLOG))
 
     assert len(FakeThread.created) == 1
-    assert FakeThread.created[0].args == (app.MODE_WORKLOG, app.HOTKEY_WORKLOG, 6, "Loopback")
+    assert FakeThread.created[0].target is app.start_worklog_after_hold
+    assert FakeThread.created[0].args == (1,)
 
 
 def test_on_press_worklog_double_tap_opens_log_without_starting_recording(monkeypatch):
@@ -721,7 +805,7 @@ def test_on_press_worklog_double_tap_opens_log_without_starting_recording(monkey
         app.state.last_worklog_tap_time = 10.0
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.2)
 
-    app.on_press(make_key("F9"))
+    app.on_press(make_key(app.HOTKEY_WORKLOG))
 
     assert opened == ["opened"]
     assert FakeThread.created == []
@@ -743,7 +827,7 @@ def test_on_press_in_toggle_mode_stops_active_session(monkeypatch):
         app.state.toggle_mode_enabled = True
         app.state.active_hotkey = app.HOTKEY_DICTATION
 
-    app.on_press(make_key("F8"))
+    app.on_press(make_key(app.HOTKEY_DICTATION))
 
     assert app.state.should_stop is True
 
@@ -753,7 +837,7 @@ def test_on_release_records_short_worklog_tap_time(monkeypatch):
         app.state.worklog_press_time = 10.0
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.2)
 
-    app.on_release(make_key("F9"))
+    app.on_release(make_key(app.HOTKEY_WORKLOG))
 
     assert app.state.worklog_press_time == 0.0
     assert app.state.last_worklog_tap_time == 10.2
@@ -767,8 +851,8 @@ def test_on_release_clears_last_tap_for_long_press_and_respects_toggle_mode(monk
         app.state.active_hotkey = app.HOTKEY_DICTATION
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.5)
 
-    app.on_release(make_key("F9"))
-    app.on_release(make_key("F8"))
+    app.on_release(make_key(app.HOTKEY_WORKLOG))
+    app.on_release(make_key(app.HOTKEY_DICTATION))
 
     assert app.state.last_worklog_tap_time == 0.0
     assert app.state.should_stop is False
@@ -779,9 +863,17 @@ def test_on_release_sets_should_stop_for_matching_hotkey():
         app.state.is_listening = True
         app.state.active_hotkey = app.HOTKEY_DICTATION
 
-    app.on_release(make_key("F8"))
+    app.on_release(make_key(app.HOTKEY_DICTATION))
 
     assert app.state.should_stop is True
+
+
+def test_on_release_shift_clears_modifier_state():
+    app.on_press(make_key("SHIFT"))
+
+    app.on_release(make_key("SHIFT"))
+
+    assert app.state.shift_keys_down == set()
 
 
 def test_on_release_clears_double_tap_flag_without_recording_timestamp(monkeypatch):
@@ -790,7 +882,7 @@ def test_on_release_clears_double_tap_flag_without_recording_timestamp(monkeypat
         app.state.worklog_press_time = 10.0
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.2)
 
-    app.on_release(make_key("F9"))
+    app.on_release(make_key(app.HOTKEY_WORKLOG))
 
     assert app.state.worklog_double_tap_active is False
     assert app.state.worklog_press_time == 0.0
@@ -816,7 +908,7 @@ def test_apply_default_preset_resets_runtime_toggles(monkeypatch):
     assert app.state.toggle_mode_enabled is False
     assert app.state.monitor_enabled is False
     assert app.state.paste_suffix_mode == app.DEFAULT_SUFFIX_MODE
-    assert app.state.punctuation_terminal is False
+    assert app.state.punctuation_terminal is True
     assert app.state.punctuation_capitalize is False
     assert app.state.punctuation_normalize_spaces is False
     assert refresh_calls == ["refresh"]
@@ -881,9 +973,12 @@ def test_menu_builders_include_expected_top_level_items(monkeypatch):
         "Mute monitor",
     ]
     assert [item.text for item in menu] == [
+        f"Dictation hotkey: {app.HOTKEY_DICTATION}",
+        f"Work log hotkey: {app.HOTKEY_WORKLOG}",
         "Default (no frills)",
         "Bells and whistles",
         "Options",
+        "Transcription engine",
         "Punctuation",
         "Dictation input device",
         "Work log input device",
@@ -917,7 +1012,7 @@ def test_console_is_foreground_checks_window_handles(monkeypatch):
 
 def test_get_key_name_supports_keycode_and_named_keys():
     assert app.get_key_name(app.pynput_keyboard.KeyCode.from_char("a")) == "A"
-    assert app.get_key_name(make_key("F8")) == "F8"
+    assert app.get_key_name(make_key(app.HOTKEY_DICTATION)) == app.HOTKEY_DICTATION
     assert app.get_key_name(object()) == ""
 
 
@@ -975,7 +1070,10 @@ def test_tray_setup_marks_icon_visible_and_starts_listener(monkeypatch):
     assert refresh_calls == ["refresh"]
     assert start_calls == ["start"]
     assert logs == [
-        f"Push-to-talk ready. {app.HOTKEY_DICTATION} for dictation/paste, {app.HOTKEY_WORKLOG} for work log."
+        (
+            f"Push-to-talk ready. {app.HOTKEY_DICTATION} for dictation/paste, "
+            f"{app.HOTKEY_WORKLOG} for work log. Engine: Whisper."
+        )
     ]
 
 

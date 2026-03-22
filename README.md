@@ -9,6 +9,7 @@ for input device selection, punctuation rules, and QoL toggles.
 Features
 --------
 - Push-to-talk dictation: record and paste on release.
+- Shift-modified dictation: hold `Shift` while pressing the dictation hotkey to capture system audio instead of the microphone.
 - Work log capture: record and append a timestamped entry to `work_log.txt`.
 - Transcription engine toggle: choose Whisper or GPT-4o Realtime from the tray menu.
 - Realtime live dictation: GPT-4o Realtime streams server-side transcript deltas while you are still holding the hotkey.
@@ -22,9 +23,12 @@ Features
 
 Hotkeys
 -------
-- Dictation: `F8`
-- Work log: `F9`
-- Work log: hold `F9` (more than ~0.25s) to record, or double-tap `F9` to open `work_log.txt`.
+- Dictation: `F13` by default
+- System audio dictation: hold `Shift + F13` to capture the currently playing system audio input (defaults to a Stereo Mix-style device when available).
+- Work log: `F14` by default
+- Work log: hold `F14` (more than ~0.25s) to record, or double-tap `F14` to open `work_log.txt`.
+- Recommended Windows setup: map your mouse side button to `F13` in your mouse software. It is usually much less collision-prone than `F8`.
+- Override hotkeys with `DICTATION_HOTKEY` / `WORKLOG_HOTKEY`, or set `dictation_hotkey` / `worklog_hotkey` in `settings.json`.
 - (Windows console only) Spacebar: toggle Stereo Mix for the work log input.
 
 Tray Menu
@@ -124,8 +128,11 @@ Environment variables:
 - `REALTIME_SERVER_VAD_PREFIX_MS` (optional): server VAD prefix padding in ms, default `300`.
 - `REALTIME_SERVER_VAD_SILENCE_MS` (optional): server VAD silence duration in ms, default `700`.
 - `PUSH_TO_TALK_SETTINGS_PATH` (optional): override path for persisted tray settings (`settings.json` by default).
+- `DICTATION_HOTKEY` (optional): single-key trigger for dictation, default `F13`.
+- `WORKLOG_HOTKEY` (optional): single-key trigger for work log capture, default `F14`.
 - `DICTATION_DEVICE` (optional): device index or name fragment for dictation.
 - `WORKLOG_DEVICE` (optional): device index or name fragment for work log.
+- `SYSTEM_AUDIO_DEVICE` (optional): device index or name fragment used by `Shift + DICTATION_HOTKEY`; if unset, the app searches for `STEREO_MIX_SEARCH`.
 - `WORK_LOG_PATH` (optional): custom path for `work_log.txt`.
 - `STEREO_MIX_SEARCH` (optional): name fragment for Stereo Mix device search.
 - `MUTE_RMS_THRESHOLD` (optional): RMS threshold for mute monitor, default `0.01`.
@@ -135,15 +142,19 @@ Device selection
 ----------------
 Use the tray menu to switch input devices on the fly. For scripted setup, set
 `DICTATION_DEVICE` or `WORKLOG_DEVICE` to a device index or a partial name
-match (case-insensitive). The menu also includes a "Refresh audio devices"
-option. If a selected device disappears (for example, USB unplug/replug), the
-app retries and falls back to another available input instead of crashing.
-Reselect the desired device after it reconnects.
+match (case-insensitive). `Shift + DICTATION_HOTKEY` uses `SYSTEM_AUDIO_DEVICE`
+when configured, otherwise it searches for the `STEREO_MIX_SEARCH` input. The
+menu also includes a "Refresh audio devices" option. If a selected device
+disappears (for example, USB unplug/replug), the app retries and falls back to
+another available input instead of crashing. Reselect the desired device after
+it reconnects.
 
 Notes and tips
 --------------
 - Paste uses the standard shortcut for your platform: `Ctrl+V` on Windows/Linux
   and `Cmd+V` on macOS.
+- If you bind a mouse button through Logitech/G Hub, Razer Synapse, X-Mouse, or similar software, prefer `F13`-`F24`; those keys are usually unused by other apps.
+- System audio capture depends on a loopback-capable input device. On many Windows systems that is exposed as `Stereo Mix`; if yours uses a different name, set `SYSTEM_AUDIO_DEVICE`.
 - On Linux, paste injection does not require the root-only `keyboard` package.
   If simulated paste fails, the transcript still remains on the clipboard.
 - The global spacebar shortcut for toggling Stereo Mix is disabled on Linux and

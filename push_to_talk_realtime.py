@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Push-to-talk transcription (Windows):
-- Hold F8 to dictate and paste upon release.
-- Hold F9 to capture audio and log the transcript as a timestamped work entry.
+- Hold F13 to dictate and paste upon release.
+- Hold F14 to capture audio and log the transcript as a timestamped work entry.
 
 Notes
 -----
@@ -64,15 +64,21 @@ DEFAULT_TRANSCRIPTION_PROMPT = (
     "Transcribe exactly what is spoken. Use full sentence punctuation, including periods."
 )
 WHISPER_PROMPT = os.getenv("OPENAI_WHISPER_PROMPT", DEFAULT_TRANSCRIPTION_PROMPT).strip()
-REALTIME_TRANSCRIBE_MODEL = os.getenv("OPENAI_REALTIME_TRANSCRIBE_MODEL", "gpt-4o-transcribe").strip()
+REALTIME_TRANSCRIBE_MODEL = os.getenv(
+    "OPENAI_REALTIME_TRANSCRIBE_MODEL", "gpt-4o-transcribe"
+).strip()
 REALTIME_SESSION_MODEL = os.getenv("OPENAI_REALTIME_SESSION_MODEL", "").strip()
 REALTIME_TRANSCRIBE_LANGUAGE = os.getenv("OPENAI_REALTIME_TRANSCRIBE_LANGUAGE", "").strip()
-REALTIME_TRANSCRIBE_PROMPT = os.getenv("OPENAI_REALTIME_TRANSCRIBE_PROMPT", DEFAULT_TRANSCRIPTION_PROMPT).strip()
+REALTIME_TRANSCRIBE_PROMPT = os.getenv(
+    "OPENAI_REALTIME_TRANSCRIBE_PROMPT", DEFAULT_TRANSCRIPTION_PROMPT
+).strip()
 REALTIME_WS_URL = os.getenv(
     "OPENAI_REALTIME_WS_URL",
     "wss://api.openai.com/v1/realtime?intent=transcription",
 ).strip()
-REALTIME_WS_USE_BETA_HEADER = os.getenv("OPENAI_REALTIME_WS_USE_BETA_HEADER", "0").strip().lower() not in {
+REALTIME_WS_USE_BETA_HEADER = os.getenv(
+    "OPENAI_REALTIME_WS_USE_BETA_HEADER", "0"
+).strip().lower() not in {
     "0",
     "false",
     "no",
@@ -80,7 +86,9 @@ REALTIME_WS_USE_BETA_HEADER = os.getenv("OPENAI_REALTIME_WS_USE_BETA_HEADER", "0
 }
 TRANSCRIPTION_ENGINE_WHISPER = "whisper"
 TRANSCRIPTION_ENGINE_GPT4O_REALTIME = "gpt4o_realtime"
-DEFAULT_TRANSCRIPTION_ENGINE = os.getenv("TRANSCRIPTION_ENGINE", TRANSCRIPTION_ENGINE_WHISPER).strip().lower()
+DEFAULT_TRANSCRIPTION_ENGINE = (
+    os.getenv("TRANSCRIPTION_ENGINE", TRANSCRIPTION_ENGINE_WHISPER).strip().lower()
+)
 REALTIME_INPUT_SAMPLE_RATE = 24000
 REALTIME_LIVE_TYPING_ENABLED = os.getenv("REALTIME_LIVE_TYPING", "1").strip().lower() not in {
     "0",
@@ -116,8 +124,8 @@ DEVICE_INDEX = None  # set to an index from sd.query_devices() if needed
 MODE_DICTATION = "dictation"
 MODE_WORKLOG = "worklog"
 
-HOTKEY_DICTATION = "F8"
-HOTKEY_WORKLOG = "F9"
+DEFAULT_HOTKEY_DICTATION = "F13"
+DEFAULT_HOTKEY_WORKLOG = "F14"
 PASTE_ON_RELEASE = True
 DEFAULT_SUFFIX_MODE = SUFFIX_SPACE
 WORKLOG_DOUBLE_TAP_WINDOW_S = 0.4
@@ -127,6 +135,7 @@ WORK_LOG_PATH = Path(os.getenv("WORK_LOG_PATH") or (SCRIPT_DIR / "work_log.txt")
 SETTINGS_PATH = Path(os.getenv("PUSH_TO_TALK_SETTINGS_PATH") or (SCRIPT_DIR / "settings.json"))
 DEFAULT_DEVICE_LABEL = "System default input"
 STEREO_MIX_SEARCH = os.getenv("STEREO_MIX_SEARCH", "Stereo Mix")
+SYSTEM_AUDIO_DEVICE = os.getenv("SYSTEM_AUDIO_DEVICE", "").strip()
 IS_WINDOWS = platform.system().lower().startswith("win")
 try:
     USER32 = ctypes.windll.user32 if IS_WINDOWS else None
@@ -167,6 +176,21 @@ def transcription_engine_label(engine: str) -> str:
     if normalized == TRANSCRIPTION_ENGINE_GPT4O_REALTIME:
         return "GPT-4o Realtime"
     return "Whisper"
+
+
+def normalize_hotkey_name(value: Any, default: str) -> str:
+    hotkey = str(value or "").strip().upper()
+    return hotkey or default
+
+
+HOTKEY_DICTATION = normalize_hotkey_name(
+    os.getenv("DICTATION_HOTKEY"),
+    DEFAULT_HOTKEY_DICTATION,
+)
+HOTKEY_WORKLOG = normalize_hotkey_name(
+    os.getenv("WORKLOG_HOTKEY"),
+    DEFAULT_HOTKEY_WORKLOG,
+)
 
 
 # -------------------- State --------------------
@@ -231,6 +255,7 @@ class SessionState:
     worklog_is_pressed: bool = False
     worklog_press_token: int = 0
     tray_spinner_step: int = 0
+    shift_keys_down: set[str] = field(default_factory=set)
 
 
 state = SessionState()
@@ -274,6 +299,8 @@ def save_settings_to_disk() -> None:
     with state.lock:
         payload = {
             "transcription_engine": state.transcription_engine,
+            "dictation_hotkey": HOTKEY_DICTATION,
+            "worklog_hotkey": HOTKEY_WORKLOG,
         }
     try:
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -285,13 +312,30 @@ def save_settings_to_disk() -> None:
 
 
 def apply_persisted_settings() -> None:
+    global HOTKEY_DICTATION, HOTKEY_WORKLOG
+
     settings = load_settings_from_disk()
     if not settings:
         return
     engine = normalize_transcription_engine(str(settings.get("transcription_engine", "")))
+    dictation_hotkey = HOTKEY_DICTATION
+    worklog_hotkey = HOTKEY_WORKLOG
+    if "DICTATION_HOTKEY" not in os.environ:
+        dictation_hotkey = normalize_hotkey_name(
+            settings.get("dictation_hotkey"),
+            HOTKEY_DICTATION,
+        )
+    if "WORKLOG_HOTKEY" not in os.environ:
+        worklog_hotkey = normalize_hotkey_name(
+            settings.get("worklog_hotkey"),
+            HOTKEY_WORKLOG,
+        )
     with state.lock:
         state.transcription_engine = engine
+    HOTKEY_DICTATION = dictation_hotkey
+    HOTKEY_WORKLOG = worklog_hotkey
     log(f"[Settings] Loaded transcription engine: {transcription_engine_label(engine)}")
+    log(f"[Settings] Loaded hotkeys: dictation={HOTKEY_DICTATION}, worklog={HOTKEY_WORKLOG}")
 
 
 apply_persisted_settings()
@@ -616,6 +660,34 @@ def log_device_selection(role: str, index: int | None, label: str) -> None:
     log(f"[Audio] {role} device -> {label} (index={index_text})")
 
 
+def system_audio_search_hint() -> str:
+    return SYSTEM_AUDIO_DEVICE or STEREO_MIX_SEARCH
+
+
+def resolve_system_audio_input_device() -> tuple[int | None, str, bool]:
+    descriptor = SYSTEM_AUDIO_DEVICE
+    if descriptor:
+        idx, label, ok = resolve_device_descriptor(descriptor)
+        if ok:
+            return idx, label, True
+        return None, "", False
+
+    with state.lock:
+        cached_index = state.stereo_mix_device_index
+        cached_label = state.stereo_mix_device_label
+    if cached_index is not None and cached_label:
+        return cached_index, cached_label, True
+
+    idx, label = lookup_input_device_by_name(STEREO_MIX_SEARCH)
+    if idx is None:
+        return None, "", False
+
+    with state.lock:
+        state.stereo_mix_device_index = idx
+        state.stereo_mix_device_label = label
+    return idx, label, True
+
+
 def initialize_device_state() -> None:
     fallback_index = DEVICE_INDEX
     fallback_label = DEFAULT_DEVICE_LABEL
@@ -832,6 +904,7 @@ def transcribe_with_whisper(chunks: list) -> str:
     except Exception as exc:  # pylint: disable=broad-except
         log("[Whisper error]", exc)
         return ""
+
 
 # -------------------- Orchestration --------------------
 def resample_pcm16_mono(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
@@ -1136,7 +1209,9 @@ def transcribe_with_gpt4o_realtime_stream_server_vad(
                             json.dumps(
                                 {
                                     "type": "input_audio_buffer.append",
-                                    "audio": base64.b64encode(pcm_resampled.tobytes()).decode("ascii"),
+                                    "audio": base64.b64encode(pcm_resampled.tobytes()).decode(
+                                        "ascii"
+                                    ),
                                 }
                             )
                         )
@@ -1203,7 +1278,11 @@ def transcribe_with_gpt4o_realtime_stream_server_vad(
                     elif event_type == "error":
                         err_obj = event.get("error", {})
                         if isinstance(err_obj, dict):
-                            err_msg = str(err_obj.get("message") or err_obj.get("type") or "unknown realtime error")
+                            err_msg = str(
+                                err_obj.get("message")
+                                or err_obj.get("type")
+                                or "unknown realtime error"
+                            )
                         else:
                             err_msg = str(err_obj)
                         raise RuntimeError(f"Realtime error: {err_msg}")
@@ -1249,7 +1328,9 @@ def transcribe_audio(chunks: list, engine: str) -> str:
         return transcribe_with_gpt4o_realtime(chunks)
     return transcribe_with_whisper(chunks)
 
+
 # -------------------- Orchestration --------------------
+
 
 def begin_session_start(
     mode: str,
@@ -1272,6 +1353,7 @@ def begin_session_start(
             state.session_start_pending = False
         raise
     return True
+
 
 def start_listening(
     mode: str,
@@ -1323,9 +1405,7 @@ def start_listening(
     realtime_delta_parts: list[str] = []
     realtime_delta_lock = threading.Lock()
     live_typing_enabled = (
-        use_realtime_streaming
-        and mode == MODE_DICTATION
-        and REALTIME_LIVE_TYPING_ENABLED
+        use_realtime_streaming and mode == MODE_DICTATION and REALTIME_LIVE_TYPING_ENABLED
     )
 
     on_audio_chunk: Optional[Callable[[np.ndarray], None]] = None
@@ -1467,11 +1547,15 @@ def start_listening(
             transcript_text = (realtime_result.get("text", "") or "").strip()
             if not transcript_text:
                 log("[Realtime] No transcript returned from server-side realtime.")
-                log("[Realtime] Strict mode keeps realtime-only behavior; no Whisper fallback is applied.")
+                log(
+                    "[Realtime] Strict mode keeps realtime-only behavior; no Whisper fallback is applied."
+                )
                 transcription_engine_used = TRANSCRIPTION_ENGINE_GPT4O_REALTIME
     else:
         transcript_text = transcribe_audio(chunks, transcription_engine)
-        if (transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME and transcript_text) or transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME:
+        if (
+            transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME and transcript_text
+        ) or transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME:
             transcription_engine_used = TRANSCRIPTION_ENGINE_GPT4O_REALTIME
     final_text = apply_punctuation_options(transcript_text)
     transcribe_end = time.perf_counter()
@@ -1515,7 +1599,9 @@ def start_listening(
                     if live_applied:
                         log("[Realtime] Live dictation finalized in place.")
                 if live_typing_enabled and live_text and not live_applied:
-                    log("[Realtime] Live text changed too much to auto-correct; skipped final paste to avoid duplicates.")
+                    log(
+                        "[Realtime] Live text changed too much to auto-correct; skipped final paste to avoid duplicates."
+                    )
                 elif not live_applied:
                     if paste_text(final_text):
                         log("[Pasted] Sent clipboard text to the active window.")
@@ -1593,6 +1679,11 @@ def get_key_name(key) -> str:
         return ""
     return name.upper() if name else ""
 
+
+def is_shift_key_name(key_name: str) -> bool:
+    return key_name.startswith("SHIFT")
+
+
 def start_worklog_after_hold(press_token: int) -> None:
     time.sleep(WORKLOG_TAP_MAX_S)
     with state.lock:
@@ -1607,9 +1698,16 @@ def start_worklog_after_hold(press_token: int) -> None:
         device_index = state.worklog_device_index
         device_label = state.worklog_device_label
     begin_session_start(MODE_WORKLOG, HOTKEY_WORKLOG, device_index, device_label)
+
+
 def on_press(key):
     key_name = get_key_name(key)
     if not key_name:
+        return
+
+    if is_shift_key_name(key_name):
+        with state.lock:
+            state.shift_keys_down.add(key_name)
         return
 
     if key_name == "SPACE":
@@ -1652,8 +1750,17 @@ def on_press(key):
 
     if key_name == HOTKEY_DICTATION:
         with state.lock:
+            shift_active = bool(state.shift_keys_down)
             device_index = state.dictation_device_index
             device_label = state.dictation_device_label
+        if shift_active:
+            device_index, device_label, ok = resolve_system_audio_input_device()
+            if not ok:
+                log(
+                    "[Audio] System audio capture unavailable."
+                    f" No input device matched '{system_audio_search_hint()}'."
+                )
+                return
         begin_session_start(MODE_DICTATION, HOTKEY_DICTATION, device_index, device_label)
     elif key_name == HOTKEY_WORKLOG:
         if worklog_start_immediate:
@@ -1674,6 +1781,11 @@ def on_press(key):
 def on_release(key):
     key_name = get_key_name(key)
     if not key_name:
+        return
+
+    if is_shift_key_name(key_name):
+        with state.lock:
+            state.shift_keys_down.discard(key_name)
         return
 
     now = time.monotonic()
@@ -2015,6 +2127,8 @@ def build_options_menu() -> pystray.Menu:
 
 def build_menu() -> pystray.Menu:
     return pystray.Menu(
+        pystray.MenuItem(f"Dictation hotkey: {HOTKEY_DICTATION}", None, enabled=False),
+        pystray.MenuItem(f"Work log hotkey: {HOTKEY_WORKLOG}", None, enabled=False),
         pystray.MenuItem("Default (no frills)", apply_default_preset),
         pystray.MenuItem("Bells and whistles", apply_bells_preset),
         pystray.MenuItem("Options", build_options_menu()),

@@ -47,6 +47,7 @@ class HotkeySessionStartTests(unittest.TestCase):
             push_to_talk.state.last_worklog_tap_time = 0.0
             push_to_talk.state.worklog_double_tap_active = False
             push_to_talk.state.worklog_is_pressed = False
+            push_to_talk.state.shift_keys_down.clear()
 
     def tearDown(self) -> None:
         push_to_talk.OPENAI_API_KEY = self.original_openai_key
@@ -58,7 +59,7 @@ class HotkeySessionStartTests(unittest.TestCase):
             push_to_talk.state.should_stop = False
 
     def test_repeated_dictation_keydown_only_queues_one_session(self) -> None:
-        key = SimpleNamespace(name="f8")
+        key = SimpleNamespace(name=push_to_talk.HOTKEY_DICTATION.lower())
 
         with patch.object(push_to_talk.threading, "Thread", ThreadRecorder):
             push_to_talk.on_press(key)
