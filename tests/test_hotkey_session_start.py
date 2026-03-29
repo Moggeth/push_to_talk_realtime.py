@@ -42,8 +42,10 @@ class HotkeySessionStartTests(unittest.TestCase):
             push_to_talk.state.active_hotkey_kind = ""
             push_to_talk.state.active_hotkey_tokens = ()
             push_to_talk.state.dictation_hotkey_kind = push_to_talk.HOTKEY_KIND_KEYBOARD
-            push_to_talk.state.dictation_hotkey_tokens = (push_to_talk.HOTKEY_DICTATION,)
-            push_to_talk.state.dictation_hotkey_label = push_to_talk.HOTKEY_DICTATION
+            push_to_talk.state.dictation_hotkey_tokens = (push_to_talk.DEFAULT_HOTKEY_DICTATION,)
+            push_to_talk.state.dictation_hotkey_label = push_to_talk.format_hotkey_tokens(
+                push_to_talk.state.dictation_hotkey_tokens
+            )
             push_to_talk.state.dictation_device_index = None
             push_to_talk.state.dictation_device_label = push_to_talk.DEFAULT_DEVICE_LABEL
             push_to_talk.state.worklog_device_index = None
@@ -65,7 +67,7 @@ class HotkeySessionStartTests(unittest.TestCase):
             push_to_talk.state.should_stop = False
 
     def test_repeated_dictation_keydown_only_queues_one_session(self) -> None:
-        key = SimpleNamespace(name=push_to_talk.HOTKEY_DICTATION.lower())
+        key = SimpleNamespace(name=push_to_talk.state.dictation_hotkey_tokens[0].lower())
 
         with patch.object(push_to_talk.threading, "Thread", ThreadRecorder):
             push_to_talk.on_press(key)
@@ -77,7 +79,7 @@ class HotkeySessionStartTests(unittest.TestCase):
             self.assertTrue(push_to_talk.state.session_start_pending)
 
     def test_dictation_can_start_while_previous_audio_is_still_transcribing(self) -> None:
-        key = SimpleNamespace(name=push_to_talk.HOTKEY_DICTATION.lower())
+        key = SimpleNamespace(name=push_to_talk.state.dictation_hotkey_tokens[0].lower())
         with push_to_talk.state.lock:
             push_to_talk.state.is_transcribing = True
             push_to_talk.state.transcribing_session_count = 1
@@ -99,7 +101,7 @@ class HotkeySessionStartTests(unittest.TestCase):
             push_to_talk.MODE_DICTATION,
             push_to_talk.HOTKEY_DICTATION,
             push_to_talk.HOTKEY_KIND_KEYBOARD,
-            (push_to_talk.HOTKEY_DICTATION,),
+            push_to_talk.state.dictation_hotkey_tokens,
             None,
             push_to_talk.DEFAULT_DEVICE_LABEL,
         )

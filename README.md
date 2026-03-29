@@ -29,8 +29,8 @@ Features
 
 Hotkeys
 -------
-- Dictation: `F13` by default
-- System audio dictation: hold `Shift + F13` to capture the currently playing system audio input (defaults to a Stereo Mix-style device when available).
+- Dictation: `Caps Lock` by default
+- System audio dictation: hold `Shift + Caps Lock` to capture the currently playing system audio input (defaults to a Stereo Mix-style device when available).
 - Work log: `F14` by default
 - Work log: hold `F14` (more than ~0.25s) to record, or double-tap `F14` to open `work_log.txt`.
 - `Set Hotkey...` captures the exact drafted key or key combo and asks you to accept it before saving.
@@ -79,7 +79,7 @@ Ubuntu install commands (including system packages needed by audio/tray/clipboar
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-pip portaudio19-dev libportaudio2 libasound2-dev gir1.2-ayatanaappindicator3-0.1 python3-xlib xclip
+sudo apt install -y python3-venv python3-pip python3-tk portaudio19-dev libportaudio2 libasound2-dev gir1.2-ayatanaappindicator3-0.1 python3-xlib xclip
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -156,7 +156,7 @@ Environment variables:
 - `REALTIME_SERVER_VAD_PREFIX_MS` (optional): server VAD prefix padding in ms, default `300`.
 - `REALTIME_SERVER_VAD_SILENCE_MS` (optional): server VAD silence duration in ms, default `700`.
 - `PUSH_TO_TALK_SETTINGS_PATH` (optional): override path for persisted tray settings (`settings.json` by default).
-- `DICTATION_HOTKEY` (optional): single-key trigger for dictation, default `F13`.
+- `DICTATION_HOTKEY` (optional): single-key trigger for dictation, default `CAPS_LOCK`.
 - `WORKLOG_HOTKEY` (optional): single-key trigger for work log capture, default `F14`.
 - `PUSH_TO_TALK_SERVICE_NAME` (optional): service name used by the tray `Restart` / `Quit` actions, default `push-to-talk-realtime.service`.
 - `DICTATION_DEVICE` (optional): device index or name fragment for dictation.
@@ -186,7 +186,7 @@ Notes and tips
 - System audio capture depends on a loopback-capable input device. On many Windows systems that is exposed as `Stereo Mix`; if yours uses a different name, set `SYSTEM_AUDIO_DEVICE`.
 - On Linux, paste injection does not require the root-only `keyboard` package.
   If simulated paste fails, the transcript still remains on the clipboard.
-- The `Set Hotkey...` dialog uses the Python standard library GUI toolkit so it can run on Windows, Ubuntu, and macOS without extra GUI Python packages.
+- The `Set Hotkey...` dialog uses `tkinter` where available and falls back to GTK on Linux when launched through the system `python3` interpreter.
 - The global spacebar shortcut for toggling Stereo Mix is disabled on Linux and
   macOS to avoid intercepting normal typing in other apps. Use the tray menu
   instead.

@@ -58,6 +58,10 @@ def make_key(name: str) -> SimpleNamespace:
     return SimpleNamespace(name=name.lower())
 
 
+def make_dictation_key() -> SimpleNamespace:
+    return make_key(app.state.dictation_hotkey_tokens[0])
+
+
 def test_initialize_device_state_uses_env_selected_devices(monkeypatch):
     monkeypatch.setattr(app, "DEVICE_INDEX", None)
     monkeypatch.setenv("DICTATION_DEVICE", "usb mic")
@@ -104,6 +108,10 @@ def test_apply_punctuation_options_uses_state_flags(monkeypatch):
             "terminal_punct": True,
         },
     )
+
+
+def test_normalize_hotkey_name_maps_capslock_alias():
+    assert app.normalize_hotkey_name("capslock", app.DEFAULT_HOTKEY_DICTATION) == "CAPS_LOCK"
 
 
 def test_prepare_clipboard_text_uses_state_flags(monkeypatch):
@@ -813,7 +821,7 @@ def test_on_press_dictation_starts_worker_thread(monkeypatch):
     app.state.dictation_device_index = 4
     app.state.dictation_device_label = "USB Mic"
 
-    app.on_press(make_key(app.HOTKEY_DICTATION))
+    app.on_press(make_dictation_key())
 
     assert len(FakeThread.created) == 1
     created = FakeThread.created[0]
@@ -822,7 +830,7 @@ def test_on_press_dictation_starts_worker_thread(monkeypatch):
         app.MODE_DICTATION,
         app.HOTKEY_DICTATION,
         app.HOTKEY_KIND_KEYBOARD,
-        (app.HOTKEY_DICTATION,),
+        app.state.dictation_hotkey_tokens,
         4,
         "USB Mic",
     )
@@ -839,7 +847,7 @@ def test_on_press_shift_dictation_uses_system_audio_device(monkeypatch):
     )
 
     app.on_press(make_key("SHIFT"))
-    app.on_press(make_key(app.HOTKEY_DICTATION))
+    app.on_press(make_dictation_key())
 
     assert len(FakeThread.created) == 1
     created = FakeThread.created[0]
@@ -848,7 +856,7 @@ def test_on_press_shift_dictation_uses_system_audio_device(monkeypatch):
         app.MODE_DICTATION,
         app.HOTKEY_DICTATION,
         app.HOTKEY_KIND_KEYBOARD,
-        ("SHIFT", app.HOTKEY_DICTATION),
+        ("SHIFT", *app.state.dictation_hotkey_tokens),
         17,
         "Stereo Mix",
     )
@@ -865,7 +873,7 @@ def test_on_press_shift_dictation_skips_when_system_audio_missing(monkeypatch):
     monkeypatch.setattr(app, "log", lambda *args: logs.append(" ".join(map(str, args))))
 
     app.on_press(make_key("SHIFT"))
-    app.on_press(make_key(app.HOTKEY_DICTATION))
+    app.on_press(make_dictation_key())
 
     assert FakeThread.created == []
     assert logs == [
@@ -918,9 +926,9 @@ def test_on_press_in_toggle_mode_stops_active_session(monkeypatch):
         app.state.toggle_mode_enabled = True
         app.state.active_hotkey = app.HOTKEY_DICTATION
         app.state.active_hotkey_kind = app.HOTKEY_KIND_KEYBOARD
-        app.state.active_hotkey_tokens = (app.HOTKEY_DICTATION,)
+        app.state.active_hotkey_tokens = app.state.dictation_hotkey_tokens
 
-    app.on_press(make_key(app.HOTKEY_DICTATION))
+    app.on_press(make_dictation_key())
 
     assert app.state.should_stop is True
 
@@ -943,11 +951,11 @@ def test_on_release_clears_last_tap_for_long_press_and_respects_toggle_mode(monk
         app.state.is_listening = True
         app.state.active_hotkey = app.HOTKEY_DICTATION
         app.state.active_hotkey_kind = app.HOTKEY_KIND_KEYBOARD
-        app.state.active_hotkey_tokens = (app.HOTKEY_DICTATION,)
+        app.state.active_hotkey_tokens = app.state.dictation_hotkey_tokens
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.5)
 
     app.on_release(make_key(app.HOTKEY_WORKLOG))
-    app.on_release(make_key(app.HOTKEY_DICTATION))
+    app.on_release(make_dictation_key())
 
     assert app.state.last_worklog_tap_time == 0.0
     assert app.state.should_stop is False
@@ -958,9 +966,9 @@ def test_on_release_sets_should_stop_for_matching_hotkey():
         app.state.is_listening = True
         app.state.active_hotkey = app.HOTKEY_DICTATION
         app.state.active_hotkey_kind = app.HOTKEY_KIND_KEYBOARD
-        app.state.active_hotkey_tokens = (app.HOTKEY_DICTATION,)
+        app.state.active_hotkey_tokens = app.state.dictation_hotkey_tokens
 
-    app.on_release(make_key(app.HOTKEY_DICTATION))
+    app.on_release(make_dictation_key())
 
     assert app.state.should_stop is True
 
@@ -1146,7 +1154,7 @@ def test_console_is_foreground_checks_window_handles(monkeypatch):
 
 def test_get_key_name_supports_keycode_and_named_keys():
     assert app.get_key_name(app.pynput_keyboard.KeyCode.from_char("a")) == "A"
-    assert app.get_key_name(make_key(app.HOTKEY_DICTATION)) == app.HOTKEY_DICTATION
+    assert app.get_key_name(make_dictation_key()) == app.state.dictation_hotkey_tokens[0]
     assert app.get_key_name(object()) == ""
 
 

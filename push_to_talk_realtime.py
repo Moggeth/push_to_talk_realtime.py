@@ -128,7 +128,7 @@ MODE_WORKLOG = "worklog"
 
 HOTKEY_KIND_MOUSE = "mouse"
 HOTKEY_KIND_KEYBOARD = "keyboard"
-DEFAULT_HOTKEY_DICTATION = "F13"
+DEFAULT_HOTKEY_DICTATION = "CAPS_LOCK"
 DEFAULT_HOTKEY_WORKLOG = "F14"
 DEFAULT_DICTATION_HOTKEY_LABEL = "Three-finger touchpad press"
 DICTATION_MOUSE_BUTTON = pynput_mouse.Button.middle
@@ -187,8 +187,15 @@ def transcription_engine_label(engine: str) -> str:
     return "Whisper"
 
 
+SPECIAL_HOTKEY_NAME_ALIASES = {
+    "CAPS LOCK": "CAPS_LOCK",
+    "CAPSLOCK": "CAPS_LOCK",
+}
+
+
 def normalize_hotkey_name(value: Any, default: str) -> str:
     hotkey = str(value or "").strip().upper()
+    hotkey = SPECIAL_HOTKEY_NAME_ALIASES.get(hotkey, hotkey)
     return hotkey or default
 
 
@@ -2388,17 +2395,29 @@ def parse_hotkey_capture_output(output: str) -> dict[str, Any]:
     return {}
 
 
+def hotkey_helper_env() -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SNAP")}
+    env.pop("LD_LIBRARY_PATH", None)
+    if platform.system() == "Linux":
+        env["PATH"] = "/usr/bin:/bin"
+    return env
+
+
 def prompt_for_hotkey(_icon=None, _item=None) -> None:
     if not HOTKEY_CAPTURE_HELPER_PATH.exists():
         log(f"[Tray] Hotkey capture helper not found: {HOTKEY_CAPTURE_HELPER_PATH}")
         return
+    helper_python = sys.executable
+    if platform.system() == "Linux":
+        helper_python = os.getenv("PUSH_TO_TALK_HELPER_PYTHON", "/usr/bin/python3")
     try:
         completed = subprocess.run(
-            [sys.executable, str(HOTKEY_CAPTURE_HELPER_PATH)],
+            [helper_python, str(HOTKEY_CAPTURE_HELPER_PATH)],
             check=False,
             capture_output=True,
             text=True,
             cwd=str(SCRIPT_DIR),
+            env=hotkey_helper_env(),
         )
     except Exception as exc:  # pylint: disable=broad-except
         log("[Tray] Unable to launch the hotkey capture helper:", exc)

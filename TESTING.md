@@ -135,8 +135,8 @@ CI now runs:
 - Run: `python .\push_to_talk_realtime.py`
 - Expected: a tray icon appears and the console prints the ready message.
 
-2) Dictation hotkey (F13 by default)
-- Hold F13, speak one sentence, release.
+2) Dictation hotkey (Caps Lock by default)
+- Hold Caps Lock, speak one sentence, release.
 - Expected: beep on start/stop (if enabled), a transcript appears, and the text
   pastes into the active app.
 - While transcription is processing after key release, the tray icon shows a spinning
@@ -150,8 +150,8 @@ CI now runs:
 
 4) Realtime live typing (GPT-4o Realtime)
 - In tray menu, set "Transcription engine" -> "GPT-4o Realtime".
-- Hold F13 and speak 1-2 sentences.
-- Expected: text starts appearing before key release; releasing F13 finalizes punctuation/suffix.
+- Hold Caps Lock and speak 1-2 sentences.
+- Expected: text starts appearing before key release; releasing Caps Lock finalizes punctuation/suffix.
 - Expected: realtime behavior is server-side; no local chunking fallback should appear in logs.
 - Expected: no `invalid_model` websocket errors when using the default realtime websocket URL.
 
@@ -162,12 +162,12 @@ CI now runs:
 
 6) System audio dictation
 - Start playing a video or song.
-- Hold `Shift + F13` while the audio is playing, then release.
+- Hold `Shift + Caps Lock` while the audio is playing, then release.
 - Expected: the app captures the system audio input instead of the microphone and transcribes that audio on release.
 - If your machine does not expose a device literally named "Stereo Mix", set `SYSTEM_AUDIO_DEVICE` to the correct input name first.
 
 7) Linux non-root paste path
-- Run the app as a regular user on Linux, hold F13, speak a short phrase, release.
+- Run the app as a regular user on Linux, hold Caps Lock, speak a short phrase, release.
 - Expected: no `ImportError: You must be root to use this library on linux.`
 - If the target app does not accept simulated paste, expected fallback: the app
   logs that the transcript stayed on the clipboard instead of crashing.
@@ -178,7 +178,7 @@ CI now runs:
   lines in the console.
 
 9) Multi-sentence spacing (your request)
-- Hold F13, speak 3-5 sentences with clear full stops, release.
+- Hold Caps Lock, speak 3-5 sentences with clear full stops, release.
 - Expected: the pasted text has normal spacing between sentences, and only a
   single trailing space at the very end (no extra spaces at line breaks).
 
@@ -209,7 +209,7 @@ CI now runs:
 - Expected: after ~1.5s, a "Muted?" hint appears in the console/tray tooltip.
 
 16) Device hot-swap fallback
-- While the app is running, unplug and replug the USB mic, then press F13.
+- While the app is running, unplug and replug the USB mic, then press Caps Lock.
 - Expected: no crash; the console logs a retry/fallback message and recording
   continues or exits cleanly if no input device is available.
 
@@ -218,7 +218,7 @@ CI now runs:
 - Expected: `work_log.txt` opens and no new recording starts.
 
 18) Overlap while transcribing
-- Dictate once with F13, release, then press F13 again before the first transcript finishes.
+- Dictate once with Caps Lock, release, then press Caps Lock again before the first transcript finishes.
 - Expected: the second recording starts immediately.
 - Expected: both transcripts still appear, and they paste in the order the recordings were made.
 
