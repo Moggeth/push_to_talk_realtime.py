@@ -56,7 +56,7 @@ CI now runs:
   - Device descriptor resolution, fallback device picking, and device list refresh.
   - Clipboard paste flow, work-log append behavior, and tray status updates.
   - Keyboard and mouse hotkey press/release transitions, double-tap work-log handling, and toggle mode stop behavior.
-  - Persisted dictation hotkey kind/tokens, hotkey capture helper parsing, tray restart/quit actions, menu builders, tray startup/shutdown, and `main()` bootstrap wiring.
+  - Persisted dictation hotkey kind/tokens, default-on transcript history, startup toggle helpers, hotkey capture helper parsing, tray restart/quit actions, menu builders, tray startup/shutdown, and `main()` bootstrap wiring.
 
 - `test_apply_punctuation_options_normalize_capitalize_terminal`
   - Input: `"  hello   world  "`
@@ -200,34 +200,50 @@ CI now runs:
 - Use `Set Hotkey...` to save a new dictation key or combo, exit the app, relaunch it.
 - Expected: the tray still shows the saved dictation hotkey and it works without reconfiguration.
 
-14) Work log hotkey (F14 by default)
-- Hold F14 for at least ~0.25s, speak a short sentence, release.
-- Expected: a new timestamped line appears in `work_log.txt`.
+14) Transcript history (default on)
+- Dictate once with the normal dictation hotkey, then open the history file from the tray.
+- Expected: a new line is appended with a full date/time stamp and a `[Dictation]` tag.
+- In `Options`, toggle `Save transcript history` off, dictate again, and confirm no new dictation history line is added.
 
-15) Mute monitor (optional)
+15) Work log hotkey (F14 by default)
+- Hold F14 for at least ~0.25s, speak a short sentence, release.
+- Expected: a new timestamped line appears in `work_log.txt` with a `[Work log]` tag.
+
+16) Mute monitor (optional)
 - Enable "Mute monitor", then start recording while silent.
 - Expected: after ~1.5s, a "Muted?" hint appears in the console/tray tooltip.
 
-16) Device hot-swap fallback
+17) Device hot-swap fallback
 - While the app is running, unplug and replug the USB mic, then press Caps Lock.
 - Expected: no crash; the console logs a retry/fallback message and recording
   continues or exits cleanly if no input device is available.
 
-17) Work log double-tap
+18) Work log double-tap
 - Double-tap F14 while idle.
 - Expected: `work_log.txt` opens and no new recording starts.
 
-18) Overlap while transcribing
+19) Overlap while transcribing
 - Dictate once with Caps Lock, release, then press Caps Lock again before the first transcript finishes.
 - Expected: the second recording starts immediately.
 - Expected: both transcripts still appear, and they paste in the order the recordings were made.
 
-19) Tray restart and quit actions
+20) Run on startup toggle
+- Open `Options` -> `Run on startup`.
+- Expected on Linux: a user systemd service is written/enabled for the current checkout and starts immediately.
+- Expected on Windows/macOS: the platform startup artifact is created for the current checkout.
+- Toggle it off again.
+- Expected: the startup artifact is disabled or removed cleanly.
+
+21) Tray restart and quit actions
 - If running under the included user systemd service on Linux, click `Restart` and `Quit` from the tray.
 - Expected: `Restart` restarts the service cleanly and the tray returns.
 - Expected: `Quit` stops the service.
 - If running the script directly instead of under systemd, `Restart` should relaunch the script and `Quit` should only close the current process.
 
-20) Mouse-side-button remap
+22) Starter script
+- Run `python start_push_to_talk.py`.
+- Expected: the tray app starts exactly like running the main module directly.
+
+23) Mouse-side-button remap
 - Map a spare mouse button to `F13`, relaunch the app, then hold that button and speak.
 - Expected: dictation starts/stops cleanly and other apps no longer react as if `F8` was pressed.

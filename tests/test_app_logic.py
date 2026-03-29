@@ -351,7 +351,24 @@ def test_append_work_log_entry_writes_timestamped_single_line(monkeypatch, tmp_p
     app.append_work_log_entry("First line\nSecond line")
 
     assert work_log_path.read_text(encoding="utf-8") == (
-        "- 2026-01-02 03:04:05 First line Second line\n"
+        "- 2026-01-02 03:04:05 [Work log] First line Second line\n"
+    )
+
+
+def test_append_dictation_history_entry_writes_timestamped_single_line(monkeypatch, tmp_path: Path):
+    class FixedDateTime:
+        @staticmethod
+        def now() -> datetime:
+            return datetime(2026, 1, 2, 3, 4, 5)
+
+    work_log_path = tmp_path / "logs" / "work_log.txt"
+    monkeypatch.setattr(app, "datetime", FixedDateTime)
+    monkeypatch.setattr(app, "WORK_LOG_PATH", work_log_path)
+
+    app.append_dictation_history_entry("First line\nSecond line")
+
+    assert work_log_path.read_text(encoding="utf-8") == (
+        "- 2026-01-02 03:04:05 [Dictation] First line Second line\n"
     )
 
 
@@ -361,6 +378,7 @@ def test_apply_persisted_settings_loads_hotkeys_and_engine(monkeypatch, tmp_path
         json.dumps(
             {
                 "transcription_engine": app.TRANSCRIPTION_ENGINE_GPT4O_REALTIME,
+                "dictation_history_enabled": False,
                 "dictation_hotkey": "f15",
                 "worklog_hotkey": "f16",
             }
@@ -379,6 +397,7 @@ def test_apply_persisted_settings_loads_hotkeys_and_engine(monkeypatch, tmp_path
     assert app.state.dictation_hotkey_kind == app.HOTKEY_KIND_KEYBOARD
     assert app.state.dictation_hotkey_tokens == ("F15",)
     assert app.state.dictation_hotkey_label == "F15"
+    assert app.state.dictation_history_enabled is False
 
 
 def test_save_settings_to_disk_includes_hotkeys(monkeypatch, tmp_path: Path):
@@ -391,6 +410,7 @@ def test_save_settings_to_disk_includes_hotkeys(monkeypatch, tmp_path: Path):
         app.state.dictation_hotkey_kind = app.HOTKEY_KIND_KEYBOARD
         app.state.dictation_hotkey_tokens = ("F17",)
         app.state.dictation_hotkey_label = "F17"
+        app.state.dictation_history_enabled = False
 
     app.save_settings_to_disk()
 
@@ -399,6 +419,7 @@ def test_save_settings_to_disk_includes_hotkeys(monkeypatch, tmp_path: Path):
         "transcription_engine": app.TRANSCRIPTION_ENGINE_WHISPER,
         "dictation_hotkey_kind": app.HOTKEY_KIND_KEYBOARD,
         "dictation_hotkey_tokens": ["F17"],
+        "dictation_history_enabled": False,
         "dictation_hotkey": "F17",
         "worklog_hotkey": "F18",
     }
@@ -737,6 +758,20 @@ def test_toggle_attr_and_suffix_helpers_refresh_menu(monkeypatch):
     assert refresh_calls == ["refresh", "refresh"]
 
 
+def test_toggle_dictation_history_saves_and_refreshes_menu(monkeypatch):
+    refresh_calls = []
+    save_calls = []
+    monkeypatch.setattr(app, "refresh_tray_menu", lambda: refresh_calls.append("refresh"))
+    monkeypatch.setattr(app, "save_settings_to_disk", lambda: save_calls.append("save"))
+    monkeypatch.setattr(app, "log", lambda *args: None)
+
+    app.toggle_dictation_history()
+
+    assert app.state.dictation_history_enabled is False
+    assert save_calls == ["save"]
+    assert refresh_calls == ["refresh"]
+
+
 def test_toggle_wrappers_flip_expected_flags(monkeypatch):
     toggled = []
     monkeypatch.setattr(app, "toggle_attr", lambda name: toggled.append(name))
@@ -1039,6 +1074,7 @@ def test_apply_default_preset_resets_runtime_toggles(monkeypatch):
         app.state.punctuation_terminal = True
         app.state.punctuation_capitalize = True
         app.state.punctuation_normalize_spaces = True
+        app.state.dictation_history_enabled = False
 
     app.apply_default_preset()
 
@@ -1050,6 +1086,7 @@ def test_apply_default_preset_resets_runtime_toggles(monkeypatch):
     assert app.state.punctuation_terminal is True
     assert app.state.punctuation_capitalize is False
     assert app.state.punctuation_normalize_spaces is False
+    assert app.state.dictation_history_enabled is True
     assert refresh_calls == ["refresh"]
 
 
@@ -1106,6 +1143,8 @@ def test_menu_builders_include_expected_top_level_items(monkeypatch):
         "Normalize whitespace",
     ]
     assert [item.text for item in options_menu] == [
+        "Save transcript history",
+        "Run on startup",
         "Toggle mode (tap to start/stop)",
         "Beeps",
         "Status tooltip",
@@ -1124,7 +1163,7 @@ def test_menu_builders_include_expected_top_level_items(monkeypatch):
         "Dictation input device",
         "Work log input device",
         "Refresh audio devices",
-        "Open work log",
+        "Open transcript history",
         "Restart",
         "Quit",
     ]
@@ -1172,7 +1211,7 @@ def test_ensure_and_open_work_log_create_file_and_log_path(monkeypatch, tmp_path
     app.open_work_log()
 
     assert work_log_path.exists() is True
-    assert logs == [f"[Tray] Work log located at {work_log_path}"]
+    assert logs == [f"[Tray] Transcript history located at {work_log_path}"]
 
 
 def test_initialize_device_state_reverts_invalid_default_device(monkeypatch):
@@ -1330,3 +1369,30 @@ def test_restart_and_quit_use_systemd_when_managed(monkeypatch):
     app.quit_app()
 
     assert actions == ["restart", "stop"]
+
+
+def test_render_linux_systemd_service_uses_current_paths(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(app, "SCRIPT_DIR", tmp_path / "repo")
+    monkeypatch.setattr(app, "STARTER_SCRIPT_PATH", tmp_path / "repo" / "start_push_to_talk.py")
+    monkeypatch.setattr(app, "SYSTEMD_SERVICE_NAME", "push-to-talk-realtime.service")
+    monkeypatch.setattr(app.sys, "executable", "/venv/bin/python")
+
+    rendered = app.render_linux_systemd_service()
+
+    assert f"WorkingDirectory={tmp_path / 'repo'}" in rendered
+    assert "EnvironmentFile=-" in rendered
+    assert f"ExecStart=/venv/bin/python {tmp_path / 'repo' / 'start_push_to_talk.py'}" in rendered
+
+
+def test_toggle_run_on_startup_enables_and_refreshes(monkeypatch):
+    refresh_calls = []
+    logs = []
+    monkeypatch.setattr(app, "is_run_on_startup_enabled", lambda: False)
+    monkeypatch.setattr(app, "enable_run_on_startup", lambda: True)
+    monkeypatch.setattr(app, "refresh_tray_menu", lambda: refresh_calls.append("refresh"))
+    monkeypatch.setattr(app, "log", lambda *args: logs.append(" ".join(map(str, args))))
+
+    app.toggle_run_on_startup()
+
+    assert refresh_calls == ["refresh"]
+    assert logs == ["[Startup] Run on startup enabled."]

@@ -6,9 +6,9 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory=%h/code/push_to_talk_realtime.py
-EnvironmentFile=%h/.config/push-to-talk-realtime.env
+EnvironmentFile=-%h/.config/push-to-talk-realtime.env
 Environment=PUSH_TO_TALK_MANAGED_BY_SYSTEMD=1
-ExecStart=%h/code/push_to_talk_realtime.py/.venv/bin/python %h/code/push_to_talk_realtime.py/push_to_talk_realtime.py
+ExecStart=%h/code/push_to_talk_realtime.py/.venv/bin/python %h/code/push_to_talk_realtime.py/start_push_to_talk.py
 Restart=always
 RestartSec=2
 

@@ -17,6 +17,7 @@ import ctypes
 import json
 import os
 import platform
+import plistlib
 import queue
 import signal
 import subprocess
@@ -134,14 +135,17 @@ DEFAULT_DICTATION_HOTKEY_LABEL = "Three-finger touchpad press"
 DICTATION_MOUSE_BUTTON = pynput_mouse.Button.middle
 PASTE_ON_RELEASE = True
 DEFAULT_SUFFIX_MODE = SUFFIX_SPACE
+DEFAULT_DICTATION_HISTORY_ENABLED = True
 WORKLOG_DOUBLE_TAP_WINDOW_S = 0.4
 WORKLOG_TAP_MAX_S = 0.25
 SCRIPT_DIR = Path(__file__).resolve().parent
+STARTER_SCRIPT_PATH = SCRIPT_DIR / "start_push_to_talk.py"
 WORK_LOG_PATH = Path(os.getenv("WORK_LOG_PATH") or (SCRIPT_DIR / "work_log.txt"))
 SETTINGS_PATH = Path(os.getenv("PUSH_TO_TALK_SETTINGS_PATH") or (SCRIPT_DIR / "settings.json"))
 HOTKEY_CAPTURE_HELPER_PATH = SCRIPT_DIR / "hotkey_capture_helper.py"
 SYSTEMD_SERVICE_NAME = os.getenv("PUSH_TO_TALK_SERVICE_NAME", "push-to-talk-realtime.service")
 SYSTEMD_MANAGED_ENV = "PUSH_TO_TALK_MANAGED_BY_SYSTEMD"
+MACOS_LAUNCH_AGENT_NAME = "com.moggeth.push-to-talk-realtime"
 DEFAULT_DEVICE_LABEL = "System default input"
 STEREO_MIX_SEARCH = os.getenv("STEREO_MIX_SEARCH", "Stereo Mix")
 SYSTEM_AUDIO_DEVICE = os.getenv("SYSTEM_AUDIO_DEVICE", "").strip()
@@ -271,6 +275,7 @@ class SessionState:
     punctuation_terminal: bool = True
     punctuation_capitalize: bool = False
     punctuation_normalize_spaces: bool = False
+    dictation_history_enabled: bool = DEFAULT_DICTATION_HISTORY_ENABLED
     transcription_engine: str = normalize_transcription_engine(DEFAULT_TRANSCRIPTION_ENGINE)
     worklog_press_time: float = 0.0
     last_worklog_tap_time: float = 0.0
@@ -419,6 +424,7 @@ def save_settings_to_disk() -> None:
             "transcription_engine": state.transcription_engine,
             "dictation_hotkey_kind": state.dictation_hotkey_kind,
             "dictation_hotkey_tokens": list(state.dictation_hotkey_tokens),
+            "dictation_history_enabled": state.dictation_history_enabled,
             "dictation_hotkey": HOTKEY_DICTATION,
             "worklog_hotkey": HOTKEY_WORKLOG,
         }
@@ -439,6 +445,7 @@ def apply_persisted_settings() -> None:
     dictation_kind = HOTKEY_KIND_KEYBOARD
     dictation_tokens = (HOTKEY_DICTATION,)
     worklog_hotkey = HOTKEY_WORKLOG
+    dictation_history_enabled = DEFAULT_DICTATION_HISTORY_ENABLED
 
     if "DICTATION_HOTKEY" not in os.environ and settings:
         saved_kind = str(settings.get("dictation_hotkey_kind", "")).strip().lower()
@@ -462,16 +469,25 @@ def apply_persisted_settings() -> None:
             settings.get("worklog_hotkey"),
             HOTKEY_WORKLOG,
         )
+    if settings:
+        dictation_history_enabled = bool(
+            settings.get("dictation_history_enabled", DEFAULT_DICTATION_HISTORY_ENABLED)
+        )
     with state.lock:
         state.transcription_engine = engine
         state.dictation_hotkey_kind = dictation_kind
         state.dictation_hotkey_tokens = dictation_tokens
         state.dictation_hotkey_label = format_hotkey_tokens(dictation_tokens)
+        state.dictation_history_enabled = dictation_history_enabled
     HOTKEY_WORKLOG = worklog_hotkey
     log(f"[Settings] Loaded transcription engine: {transcription_engine_label(engine)}")
     log(
         "[Settings] Loaded hotkeys:"
         f" dictation={dictation_hotkey_summary()}, worklog={HOTKEY_WORKLOG}"
+    )
+    log(
+        "[Settings] Transcript history:",
+        "enabled" if dictation_history_enabled else "disabled",
     )
 
 
@@ -709,10 +725,10 @@ def advance_output_turn() -> None:
         state.output_condition.notify_all()
 
 
-def append_work_log_entry(text: str):
+def append_history_entry(text: str, source: str) -> None:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sanitized = " ".join(text.strip().splitlines())
-    line = f"- {timestamp} {sanitized}"
+    line = f"- {timestamp} [{source}] {sanitized}"
     try:
         WORK_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with WORK_LOG_PATH.open("a", encoding="utf-8") as fh:
@@ -721,6 +737,14 @@ def append_work_log_entry(text: str):
         log("[Work log error]", exc)
     else:
         log(f"[Logged] {line}")
+
+
+def append_work_log_entry(text: str) -> None:
+    append_history_entry(text, "Work log")
+
+
+def append_dictation_history_entry(text: str) -> None:
+    append_history_entry(text, "Dictation")
 
 
 # -------------------- Audio device helpers --------------------
@@ -1850,6 +1874,10 @@ def start_listening(
             if mode == MODE_WORKLOG:
                 append_work_log_entry(final_text)
             else:
+                with state.lock:
+                    dictation_history_enabled = state.dictation_history_enabled
+                if dictation_history_enabled:
+                    append_dictation_history_entry(final_text)
                 log("\n[Final]:", final_text)
                 if PASTE_ON_RELEASE:
                     prepared_final = prepare_clipboard_text(final_text)
@@ -2188,9 +2216,9 @@ def open_work_log(_icon=None, _item=None) -> None:
         if IS_WINDOWS and hasattr(os, "startfile"):
             os.startfile(str(WORK_LOG_PATH))  # type: ignore[attr-defined]
         else:
-            log(f"[Tray] Work log located at {WORK_LOG_PATH}")
+            log(f"[Tray] Transcript history located at {WORK_LOG_PATH}")
     except Exception as exc:  # pylint: disable=broad-except
-        log("[Tray] Unable to open work log file:", exc)
+        log("[Tray] Unable to open transcript history:", exc)
 
 
 def update_tray_icon() -> None:
@@ -2284,6 +2312,15 @@ def set_paste_suffix_mode(mode: str) -> None:
     refresh_tray_menu()
 
 
+def toggle_dictation_history(_icon=None, _item=None) -> None:
+    with state.lock:
+        state.dictation_history_enabled = not state.dictation_history_enabled
+        enabled = state.dictation_history_enabled
+    save_settings_to_disk()
+    log("[History]", "Transcript history enabled." if enabled else "Transcript history disabled.")
+    refresh_tray_menu()
+
+
 def set_transcription_engine(engine: str) -> None:
     normalized = normalize_transcription_engine(engine)
     if normalized == TRANSCRIPTION_ENGINE_GPT4O_REALTIME:
@@ -2349,6 +2386,7 @@ def apply_default_preset(_icon=None, _item=None) -> None:
         state.punctuation_terminal = True
         state.punctuation_capitalize = False
         state.punctuation_normalize_spaces = False
+        state.dictation_history_enabled = DEFAULT_DICTATION_HISTORY_ENABLED
         state.transcription_engine = TRANSCRIPTION_ENGINE_WHISPER
     save_settings_to_disk()
     refresh_tray_menu()
@@ -2379,6 +2417,202 @@ def run_systemd_action(action: str) -> bool:
         log(f"[Tray] Unable to {action} {SYSTEMD_SERVICE_NAME}:", exc)
         return False
     return True
+
+
+def windows_startup_script_path() -> Path:
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        return (
+            Path(appdata)
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs"
+            / "Startup"
+            / "push-to-talk-realtime.cmd"
+        )
+    return (
+        Path.home()
+        / "AppData"
+        / "Roaming"
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Startup"
+        / "push-to-talk-realtime.cmd"
+    )
+
+
+def macos_launch_agent_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{MACOS_LAUNCH_AGENT_NAME}.plist"
+
+
+def linux_user_service_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / SYSTEMD_SERVICE_NAME
+
+
+def startup_env_file_path() -> Path:
+    return Path.home() / ".config" / "push-to-talk-realtime.env"
+
+
+def startup_python_executable() -> str:
+    if platform.system() == "Windows":
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        if pythonw.exists():
+            return str(pythonw)
+    return sys.executable
+
+
+def startup_entry_script_path() -> Path:
+    return STARTER_SCRIPT_PATH
+
+
+def render_linux_systemd_service() -> str:
+    entry_script = startup_entry_script_path()
+    env_path = startup_env_file_path()
+    return "\n".join(
+        [
+            "[Unit]",
+            "Description=Push-to-talk Whisper tray app",
+            "After=graphical-session.target",
+            "PartOf=graphical-session.target",
+            "",
+            "[Service]",
+            "Type=simple",
+            f"WorkingDirectory={SCRIPT_DIR}",
+            f"EnvironmentFile=-{env_path}",
+            "Environment=PUSH_TO_TALK_MANAGED_BY_SYSTEMD=1",
+            f"ExecStart={startup_python_executable()} {entry_script}",
+            "Restart=always",
+            "RestartSec=2",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+    )
+
+
+def render_windows_startup_script() -> str:
+    return "\r\n".join(
+        [
+            "@echo off",
+            f'start "" "{startup_python_executable()}" "{startup_entry_script_path()}"',
+            "",
+        ]
+    )
+
+
+def render_macos_launch_agent() -> bytes:
+    payload = {
+        "Label": MACOS_LAUNCH_AGENT_NAME,
+        "ProgramArguments": [startup_python_executable(), str(startup_entry_script_path())],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "WorkingDirectory": str(SCRIPT_DIR),
+        "EnvironmentVariables": {"PUSH_TO_TALK_MANAGED_BY_SYSTEMD": "1"},
+    }
+    return plistlib.dumps(payload)
+
+
+def ensure_startup_env_file() -> None:
+    env_path = startup_env_file_path()
+    if env_path.exists():
+        return
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Add OPENAI_API_KEY here if it is not already in your login environment."]
+    if OPENAI_API_KEY:
+        lines.append(f"OPENAI_API_KEY={OPENAI_API_KEY}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def is_run_on_startup_enabled() -> bool:
+    system = platform.system()
+    if system == "Linux":
+        try:
+            result = subprocess.run(
+                ["systemctl", "--user", "is-enabled", SYSTEMD_SERVICE_NAME],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+    if system == "Windows":
+        return windows_startup_script_path().exists()
+    if system == "Darwin":
+        return macos_launch_agent_path().exists()
+    return False
+
+
+def enable_run_on_startup() -> bool:
+    system = platform.system()
+    try:
+        if system == "Linux":
+            ensure_startup_env_file()
+            service_path = linux_user_service_path()
+            service_path.parent.mkdir(parents=True, exist_ok=True)
+            service_path.write_text(render_linux_systemd_service(), encoding="utf-8")
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+            subprocess.run(
+                ["systemctl", "--user", "enable", "--now", SYSTEMD_SERVICE_NAME], check=True
+            )
+            return True
+        if system == "Windows":
+            startup_path = windows_startup_script_path()
+            startup_path.parent.mkdir(parents=True, exist_ok=True)
+            startup_path.write_text(render_windows_startup_script(), encoding="utf-8")
+            return True
+        if system == "Darwin":
+            plist_path = macos_launch_agent_path()
+            plist_path.parent.mkdir(parents=True, exist_ok=True)
+            plist_path.write_bytes(render_macos_launch_agent())
+            subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
+            subprocess.run(["launchctl", "load", "-w", str(plist_path)], check=True)
+            return True
+    except Exception as exc:  # pylint: disable=broad-except
+        log("[Startup] Unable to enable run on startup:", exc)
+        return False
+    log("[Startup] Run on startup is not supported on this platform.")
+    return False
+
+
+def disable_run_on_startup() -> bool:
+    system = platform.system()
+    try:
+        if system == "Linux":
+            subprocess.run(
+                ["systemctl", "--user", "disable", "--now", SYSTEMD_SERVICE_NAME],
+                check=False,
+            )
+            return True
+        if system == "Windows":
+            windows_startup_script_path().unlink(missing_ok=True)
+            return True
+        if system == "Darwin":
+            plist_path = macos_launch_agent_path()
+            subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
+            plist_path.unlink(missing_ok=True)
+            return True
+    except Exception as exc:  # pylint: disable=broad-except
+        log("[Startup] Unable to disable run on startup:", exc)
+        return False
+    log("[Startup] Run on startup is not supported on this platform.")
+    return False
+
+
+def toggle_run_on_startup(_icon=None, _item=None) -> None:
+    enabled = is_run_on_startup_enabled()
+    changed = disable_run_on_startup() if enabled else enable_run_on_startup()
+    if not changed:
+        return
+    log(
+        "[Startup]",
+        "Run on startup enabled." if not enabled else "Run on startup disabled.",
+    )
+    refresh_tray_menu()
 
 
 def parse_hotkey_capture_output(output: str) -> dict[str, Any]:
@@ -2564,6 +2798,16 @@ def build_punctuation_menu() -> pystray.Menu:
 def build_options_menu() -> pystray.Menu:
     return pystray.Menu(
         pystray.MenuItem(
+            "Save transcript history",
+            toggle_dictation_history,
+            checked=lambda _item: state.dictation_history_enabled,
+        ),
+        pystray.MenuItem(
+            "Run on startup",
+            toggle_run_on_startup,
+            checked=lambda _item: is_run_on_startup_enabled(),
+        ),
+        pystray.MenuItem(
             "Toggle mode (tap to start/stop)",
             toggle_toggle_mode,
             checked=lambda _item: state.toggle_mode_enabled,
@@ -2604,7 +2848,7 @@ def build_menu() -> pystray.Menu:
         pystray.MenuItem("Dictation input device", build_device_menu(MODE_DICTATION)),
         pystray.MenuItem("Work log input device", build_device_menu(MODE_WORKLOG)),
         pystray.MenuItem("Refresh audio devices", refresh_audio_devices),
-        pystray.MenuItem("Open work log", open_work_log),
+        pystray.MenuItem("Open transcript history", open_work_log),
         pystray.MenuItem("Restart", restart_app),
         pystray.MenuItem("Quit", quit_app),
     )

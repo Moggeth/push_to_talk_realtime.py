@@ -13,13 +13,14 @@ although external launchers can still start it by pointing at this checkout.
 Features
 --------
 - Push-to-talk dictation: record and paste on release.
+- Transcript history: dictations are saved to `work_log.txt` with date/time stamps by default, so each person can review what they said later.
 - Configurable dictation hotkey: set a single key or key combo from the tray menu, or switch back to the Linux touchpad three-finger press shortcut.
 - Shift-modified dictation: hold `Shift` while pressing the dictation hotkey to capture system audio instead of the microphone.
 - Work log capture: record and append a timestamped entry to `work_log.txt`.
 - Transcription engine toggle: choose Whisper or GPT-4o Realtime from the tray menu.
 - Realtime live dictation: GPT-4o Realtime streams server-side transcript deltas while you are still holding the hotkey.
 - Engine preference persistence: selected transcription engine is saved and restored on next launch.
-- Tray controls: `Set Hotkey...`, `Restart`, and `Quit`.
+- Tray controls: `Set Hotkey...`, transcript-history toggle, `Run on startup`, `Restart`, and `Quit`.
 - Busy tray feedback: tray icon shows a spinner while transcription is in progress.
 - Tray menu controls:
   - Select dictation/worklog input devices (including Stereo Mix).
@@ -48,6 +49,8 @@ Tray Menu
 - Default (no frills): reset QoL options to the original behavior.
 - Bells and whistles: enable beeps, status tooltip, and mute monitor.
 - Options:
+  - Save transcript history: on by default; when enabled, each final dictation is appended to `work_log.txt`.
+  - Run on startup: installs or removes the platform startup hook for the current checkout.
   - Toggle mode: tap the hotkey once to start, tap again to stop.
   - Beeps: playful two-tone sound on start/stop (Windows only).
   - Status tooltip: shows Ready/Listening/Transcribing + device + mute hint.
@@ -63,7 +66,7 @@ Tray Menu
 - Dictation input device: choose an input device (per-mode).
 - Work log input device: choose an input device (per-mode) + toggle Stereo Mix.
 - Refresh audio devices.
-- Open work log.
+- Open transcript history.
 - Restart: restart the app, or restart the user service if the app is running under systemd.
 - Quit: exit the app, or stop the user service if the app is running under systemd.
 
@@ -95,13 +98,20 @@ OPENAI_API_KEY=your_key_here
 Run:
 
 ```powershell
-python .\push_to_talk_realtime.py
+python .\start_push_to_talk.py
 ```
 
-Linux login startup
--------------------
-If you want the tray app to start automatically on login, install the included
-user service:
+Run on startup
+--------------
+The easiest path is the tray menu: open `Options` -> `Run on startup`.
+
+That toggle writes the right startup hook for the current platform:
+- Linux: a user systemd service in `~/.config/systemd/user/`
+- Windows: a startup script in the user Startup folder
+- macOS: a LaunchAgent plist in `~/Library/LaunchAgents/`
+
+If you prefer the manual Linux route, the included service file is still here as
+an example:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -110,8 +120,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now push-to-talk-realtime.service
 ```
 
-The service reads `~/.config/push-to-talk-realtime.env` for environment
-variables such as `OPENAI_API_KEY`.
+The Linux service reads `~/.config/push-to-talk-realtime.env` for variables such
+as `OPENAI_API_KEY`.
 
 Development
 -----------
@@ -163,6 +173,7 @@ Environment variables:
 - `WORKLOG_DEVICE` (optional): device index or name fragment for work log.
 - `SYSTEM_AUDIO_DEVICE` (optional): device index or name fragment used by `Shift + DICTATION_HOTKEY`; if unset, the app searches for `STEREO_MIX_SEARCH`.
 - `WORK_LOG_PATH` (optional): custom path for `work_log.txt`.
+- `PUSH_TO_TALK_HELPER_PYTHON` (optional): override the interpreter used for the hotkey capture helper on Linux.
 - `STEREO_MIX_SEARCH` (optional): name fragment for Stereo Mix device search.
 - `MUTE_RMS_THRESHOLD` (optional): RMS threshold for mute monitor, default `0.01`.
 - `MUTE_WARNING_AFTER_S` (optional): seconds before mute warning, default `1.5`.
@@ -192,7 +203,7 @@ Notes and tips
   instead.
 - If a target app blocks simulated paste, trigger paste manually from the
   clipboard or try running the console with elevated permissions on Windows.
-- The work log is a plain text file (one entry per line).
+- `work_log.txt` is a plain text history file. Dictations are tagged as `[Dictation]` and manual work-log captures are tagged as `[Work log]`.
 - Punctuation options affect both dictation and work log text content.
 - Paste suffix options affect dictation paste only.
 - Tray icon color: green when idle, red while listening, and orange + spinner while transcribing.
