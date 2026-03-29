@@ -39,6 +39,11 @@ class HotkeySessionStartTests(unittest.TestCase):
             push_to_talk.state.should_stop = False
             push_to_talk.state.toggle_mode_enabled = False
             push_to_talk.state.active_hotkey = ""
+            push_to_talk.state.active_hotkey_kind = ""
+            push_to_talk.state.active_hotkey_tokens = ()
+            push_to_talk.state.dictation_hotkey_kind = push_to_talk.HOTKEY_KIND_KEYBOARD
+            push_to_talk.state.dictation_hotkey_tokens = (push_to_talk.HOTKEY_DICTATION,)
+            push_to_talk.state.dictation_hotkey_label = push_to_talk.HOTKEY_DICTATION
             push_to_talk.state.dictation_device_index = None
             push_to_talk.state.dictation_device_label = push_to_talk.DEFAULT_DEVICE_LABEL
             push_to_talk.state.worklog_device_index = None
@@ -47,6 +52,7 @@ class HotkeySessionStartTests(unittest.TestCase):
             push_to_talk.state.last_worklog_tap_time = 0.0
             push_to_talk.state.worklog_double_tap_active = False
             push_to_talk.state.worklog_is_pressed = False
+            push_to_talk.state.pressed_keys.clear()
             push_to_talk.state.shift_keys_down.clear()
 
     def tearDown(self) -> None:
@@ -92,6 +98,8 @@ class HotkeySessionStartTests(unittest.TestCase):
         push_to_talk.start_listening(
             push_to_talk.MODE_DICTATION,
             push_to_talk.HOTKEY_DICTATION,
+            push_to_talk.HOTKEY_KIND_KEYBOARD,
+            (push_to_talk.HOTKEY_DICTATION,),
             None,
             push_to_talk.DEFAULT_DEVICE_LABEL,
         )

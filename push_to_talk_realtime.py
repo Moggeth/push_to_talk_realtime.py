@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Push-to-talk transcription (Windows):
-- Hold F13 to dictate and paste upon release.
-- Hold F14 to capture audio and log the transcript as a timestamped work entry.
+Push-to-talk transcription:
+- Hold the configured dictation trigger to dictate and paste upon release.
+- Hold the configured work-log hotkey to capture audio and append a timestamped work entry.
 
 Notes
 -----
 - Captures 16 kHz mono PCM from the default input device (set DEVICE_INDEX if needed).
 - Uses Ctrl+V on Windows/Linux and Cmd+V on macOS to paste the final text.
+- The dictation trigger is configurable and can be set to the Linux touchpad middle click.
 - Requires OPENAI_API_KEY with speech-to-text access in the environment or a .env file.
 """
 
@@ -18,6 +19,7 @@ import os
 import platform
 import queue
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -25,9 +27,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Protocol, Tuple
+from typing import Any, Protocol
 
-import keyboard  # to send ctrl+v
 import numpy as np
 import pyperclip
 import pystray
@@ -35,6 +36,7 @@ import sounddevice as sd
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw
 from pynput import keyboard as pynput_keyboard
+from pynput import mouse as pynput_mouse
 
 from platform_input import send_paste_shortcut, supports_foreground_console_detection
 from text_processing import (
@@ -124,8 +126,12 @@ DEVICE_INDEX = None  # set to an index from sd.query_devices() if needed
 MODE_DICTATION = "dictation"
 MODE_WORKLOG = "worklog"
 
+HOTKEY_KIND_MOUSE = "mouse"
+HOTKEY_KIND_KEYBOARD = "keyboard"
 DEFAULT_HOTKEY_DICTATION = "F13"
 DEFAULT_HOTKEY_WORKLOG = "F14"
+DEFAULT_DICTATION_HOTKEY_LABEL = "Three-finger touchpad press"
+DICTATION_MOUSE_BUTTON = pynput_mouse.Button.middle
 PASTE_ON_RELEASE = True
 DEFAULT_SUFFIX_MODE = SUFFIX_SPACE
 WORKLOG_DOUBLE_TAP_WINDOW_S = 0.4
@@ -133,6 +139,9 @@ WORKLOG_TAP_MAX_S = 0.25
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_LOG_PATH = Path(os.getenv("WORK_LOG_PATH") or (SCRIPT_DIR / "work_log.txt"))
 SETTINGS_PATH = Path(os.getenv("PUSH_TO_TALK_SETTINGS_PATH") or (SCRIPT_DIR / "settings.json"))
+HOTKEY_CAPTURE_HELPER_PATH = SCRIPT_DIR / "hotkey_capture_helper.py"
+SYSTEMD_SERVICE_NAME = os.getenv("PUSH_TO_TALK_SERVICE_NAME", "push-to-talk-realtime.service")
+SYSTEMD_MANAGED_ENV = "PUSH_TO_TALK_MANAGED_BY_SYSTEMD"
 DEFAULT_DEVICE_LABEL = "System default input"
 STEREO_MIX_SEARCH = os.getenv("STEREO_MIX_SEARCH", "Stereo Mix")
 SYSTEM_AUDIO_DEVICE = os.getenv("SYSTEM_AUDIO_DEVICE", "").strip()
@@ -227,7 +236,12 @@ class SessionState:
     output_condition: threading.Condition = field(default_factory=threading.Condition)
     mode: str = MODE_DICTATION
     active_hotkey: str = ""
+    active_hotkey_kind: str = ""
+    active_hotkey_tokens: tuple[str, ...] = ()
     active_device_label: str = ""
+    dictation_hotkey_kind: str = HOTKEY_KIND_KEYBOARD
+    dictation_hotkey_label: str = HOTKEY_DICTATION
+    dictation_hotkey_tokens: tuple[str, ...] = (HOTKEY_DICTATION,)
     dictation_device_index: int | None = DEVICE_INDEX
     dictation_device_label: str = DEFAULT_DEVICE_LABEL
     worklog_device_index: int | None = DEVICE_INDEX
@@ -256,6 +270,7 @@ class SessionState:
     worklog_double_tap_active: bool = False
     worklog_is_pressed: bool = False
     worklog_press_token: int = 0
+    pressed_keys: set[str] = field(default_factory=set)
     tray_spinner_step: int = 0
     next_output_session_id: int = 1
     shift_keys_down: set[str] = field(default_factory=set)
@@ -263,14 +278,72 @@ class SessionState:
 
 state = SessionState()
 shutdown_event = threading.Event()
-keyboard_listener: Optional[pynput_keyboard.Listener] = None
-tray_icon: Optional[TrayIconLike] = None
-tray_animation_thread: Optional[threading.Thread] = None
-DEVICE_LIST: list[Tuple[int, str]] = []
+keyboard_listener: pynput_keyboard.Listener | None = None
+mouse_listener: pynput_mouse.Listener | None = None
+tray_icon: TrayIconLike | None = None
+tray_animation_thread: threading.Thread | None = None
+DEVICE_LIST: list[tuple[int, str]] = []
+HOTKEY_MODIFIER_ORDER = ("CTRL", "ALT", "SHIFT", "SUPER", "ALT_GR")
+HOTKEY_DISPLAY_NAMES = {
+    "ALT": "Alt",
+    "ALT_GR": "AltGr",
+    "CAPS_LOCK": "Caps Lock",
+    "CTRL": "Ctrl",
+    "ENTER": "Enter",
+    "ESC": "Esc",
+    "PAGE_DOWN": "Page Down",
+    "PAGE_UP": "Page Up",
+    "SHIFT": "Shift",
+    "SPACE": "Space",
+    "SUPER": "Super",
+    "TAB": "Tab",
+}
+PYNPUT_KEY_ALIASES = {
+    "alt": "ALT",
+    "alt_gr": "ALT_GR",
+    "alt_l": "ALT",
+    "alt_r": "ALT",
+    "backspace": "BACKSPACE",
+    "caps_lock": "CAPS_LOCK",
+    "cmd": "SUPER",
+    "cmd_l": "SUPER",
+    "cmd_r": "SUPER",
+    "control_l": "CTRL",
+    "control_r": "CTRL",
+    "ctrl": "CTRL",
+    "ctrl_l": "CTRL",
+    "ctrl_r": "CTRL",
+    "delete": "DELETE",
+    "down": "DOWN",
+    "end": "END",
+    "enter": "ENTER",
+    "esc": "ESC",
+    "escape": "ESC",
+    "home": "HOME",
+    "insert": "INSERT",
+    "left": "LEFT",
+    "menu": "MENU",
+    "meta_l": "SUPER",
+    "meta_r": "SUPER",
+    "page_down": "PAGE_DOWN",
+    "page_up": "PAGE_UP",
+    "return": "ENTER",
+    "right": "RIGHT",
+    "shift": "SHIFT",
+    "shift_l": "SHIFT",
+    "shift_r": "SHIFT",
+    "space": "SPACE",
+    "super": "SUPER",
+    "super_l": "SUPER",
+    "super_r": "SUPER",
+    "tab": "TAB",
+    "up": "UP",
+}
 openai_client_lock = threading.Lock()
 openai_client: Any = None
 transcription_warmup_started = threading.Event()
 transcription_warmup_finished = threading.Event()
+output_keyboard_lock = threading.Lock()
 
 # -------------------- Utilities --------------------
 
@@ -283,6 +356,41 @@ def log(*a):
         encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
         safe_message = message.encode(encoding, errors="replace").decode(encoding, errors="replace")
         print(safe_message, flush=True)
+
+
+def canonicalize_hotkey_token(token: str) -> str:
+    token = (token or "").strip()
+    if not token:
+        return ""
+    normalized = PYNPUT_KEY_ALIASES.get(token.lower(), token.upper())
+    if normalized.startswith("<") and normalized.endswith(">"):
+        return ""
+    return normalized
+
+
+def canonicalize_hotkey_tokens(tokens: list[str] | set[str] | tuple[str, ...]) -> tuple[str, ...]:
+    unique = {canonicalize_hotkey_token(token) for token in tokens}
+    unique.discard("")
+    return tuple(
+        sorted(
+            unique,
+            key=lambda token: (
+                token not in HOTKEY_MODIFIER_ORDER,
+                HOTKEY_MODIFIER_ORDER.index(token) if token in HOTKEY_MODIFIER_ORDER else token,
+            ),
+        )
+    )
+
+
+def format_hotkey_tokens(tokens: tuple[str, ...]) -> str:
+    if not tokens:
+        return DEFAULT_DICTATION_HOTKEY_LABEL
+    return "+".join(HOTKEY_DISPLAY_NAMES.get(token, token.title()) for token in tokens)
+
+
+def dictation_hotkey_summary() -> str:
+    with state.lock:
+        return state.dictation_hotkey_label
 
 
 def load_settings_from_disk() -> dict[str, Any]:
@@ -302,6 +410,8 @@ def save_settings_to_disk() -> None:
     with state.lock:
         payload = {
             "transcription_engine": state.transcription_engine,
+            "dictation_hotkey_kind": state.dictation_hotkey_kind,
+            "dictation_hotkey_tokens": list(state.dictation_hotkey_tokens),
             "dictation_hotkey": HOTKEY_DICTATION,
             "worklog_hotkey": HOTKEY_WORKLOG,
         }
@@ -318,30 +428,75 @@ def apply_persisted_settings() -> None:
     global HOTKEY_DICTATION, HOTKEY_WORKLOG
 
     settings = load_settings_from_disk()
-    if not settings:
-        return
     engine = normalize_transcription_engine(str(settings.get("transcription_engine", "")))
-    dictation_hotkey = HOTKEY_DICTATION
+    dictation_kind = HOTKEY_KIND_KEYBOARD
+    dictation_tokens = (HOTKEY_DICTATION,)
     worklog_hotkey = HOTKEY_WORKLOG
-    if "DICTATION_HOTKEY" not in os.environ:
-        dictation_hotkey = normalize_hotkey_name(
-            settings.get("dictation_hotkey"),
-            HOTKEY_DICTATION,
-        )
-    if "WORKLOG_HOTKEY" not in os.environ:
+
+    if "DICTATION_HOTKEY" not in os.environ and settings:
+        saved_kind = str(settings.get("dictation_hotkey_kind", "")).strip().lower()
+        saved_tokens = canonicalize_hotkey_tokens(settings.get("dictation_hotkey_tokens", []))
+        if saved_kind == HOTKEY_KIND_MOUSE:
+            dictation_kind = HOTKEY_KIND_MOUSE
+            dictation_tokens = ()
+            HOTKEY_DICTATION = DEFAULT_DICTATION_HOTKEY_LABEL
+        elif saved_tokens:
+            dictation_tokens = saved_tokens
+            HOTKEY_DICTATION = format_hotkey_tokens(dictation_tokens)
+        else:
+            dictation_hotkey = normalize_hotkey_name(
+                settings.get("dictation_hotkey"),
+                HOTKEY_DICTATION,
+            )
+            dictation_tokens = (dictation_hotkey,)
+            HOTKEY_DICTATION = dictation_hotkey
+    if "WORKLOG_HOTKEY" not in os.environ and settings:
         worklog_hotkey = normalize_hotkey_name(
             settings.get("worklog_hotkey"),
             HOTKEY_WORKLOG,
         )
     with state.lock:
         state.transcription_engine = engine
-    HOTKEY_DICTATION = dictation_hotkey
+        state.dictation_hotkey_kind = dictation_kind
+        state.dictation_hotkey_tokens = dictation_tokens
+        state.dictation_hotkey_label = format_hotkey_tokens(dictation_tokens)
     HOTKEY_WORKLOG = worklog_hotkey
     log(f"[Settings] Loaded transcription engine: {transcription_engine_label(engine)}")
-    log(f"[Settings] Loaded hotkeys: dictation={HOTKEY_DICTATION}, worklog={HOTKEY_WORKLOG}")
+    log(
+        "[Settings] Loaded hotkeys:"
+        f" dictation={dictation_hotkey_summary()}, worklog={HOTKEY_WORKLOG}"
+    )
 
 
 apply_persisted_settings()
+
+
+def set_dictation_hotkey(kind: str, tokens: tuple[str, ...] = ()) -> None:
+    global HOTKEY_DICTATION
+    normalized_tokens = canonicalize_hotkey_tokens(tokens)
+    with state.lock:
+        if kind == HOTKEY_KIND_KEYBOARD and normalized_tokens:
+            state.dictation_hotkey_kind = HOTKEY_KIND_KEYBOARD
+            state.dictation_hotkey_tokens = normalized_tokens
+            state.dictation_hotkey_label = format_hotkey_tokens(normalized_tokens)
+            HOTKEY_DICTATION = state.dictation_hotkey_label
+        else:
+            state.dictation_hotkey_kind = HOTKEY_KIND_MOUSE
+            state.dictation_hotkey_tokens = ()
+            state.dictation_hotkey_label = DEFAULT_DICTATION_HOTKEY_LABEL
+            HOTKEY_DICTATION = DEFAULT_DICTATION_HOTKEY_LABEL
+    save_settings_to_disk()
+    refresh_tray_menu()
+
+
+def is_dictation_keyboard_hotkey_pressed() -> bool:
+    with state.lock:
+        tokens = set(state.dictation_hotkey_tokens)
+        if state.dictation_hotkey_kind != HOTKEY_KIND_KEYBOARD or not tokens:
+            return False
+        if state.pressed_keys == tokens:
+            return True
+        return "SHIFT" not in tokens and state.pressed_keys == (tokens | {"SHIFT"})
 
 
 def apply_punctuation_options(text: str) -> str:
@@ -419,7 +574,7 @@ def start_transcription_warmup() -> None:
     threading.Thread(target=_prewarm_transcription_stack, daemon=True).start()
 
 
-def realtime_dependency_error() -> Optional[str]:
+def realtime_dependency_error() -> str | None:
     if not OPENAI_API_KEY:
         return "Realtime engine unavailable: OPENAI_API_KEY not set."
     try:
@@ -461,6 +616,24 @@ def paste_text(text: str):
     return True
 
 
+def send_backspaces(count: int) -> None:
+    if count <= 0:
+        return
+    controller = pynput_keyboard.Controller()
+    with output_keyboard_lock:
+        for _ in range(count):
+            controller.press(pynput_keyboard.Key.backspace)
+            controller.release(pynput_keyboard.Key.backspace)
+
+
+def type_text_direct(text: str) -> None:
+    if not text:
+        return
+    controller = pynput_keyboard.Controller()
+    with output_keyboard_lock:
+        controller.type(text)
+
+
 def try_apply_live_dictation_correction(live_text: str, target_text: str) -> bool:
     """Adjust already-typed realtime text toward final post-processed output."""
     if not live_text:
@@ -469,7 +642,7 @@ def try_apply_live_dictation_correction(live_text: str, target_text: str) -> boo
         return True
 
     prefix_len = 0
-    for live_char, target_char in zip(live_text, target_text):
+    for live_char, target_char in zip(live_text, target_text, strict=False):
         if live_char != target_char:
             break
         prefix_len += 1
@@ -480,10 +653,9 @@ def try_apply_live_dictation_correction(live_text: str, target_text: str) -> boo
 
     to_insert = target_text[prefix_len:]
     try:
-        for _ in range(backspaces):
-            keyboard.press_and_release("backspace")
+        send_backspaces(backspaces)
         if to_insert:
-            keyboard.write(to_insert, delay=0)
+            type_text_direct(to_insert)
     except Exception as exc:  # pylint: disable=broad-except
         log("[Realtime] Live correction failed:", exc)
         return False
@@ -559,6 +731,30 @@ def stop_keyboard_listener() -> None:
     if keyboard_listener is not None:
         keyboard_listener.stop()
         keyboard_listener = None
+
+
+def start_mouse_listener() -> None:
+    global mouse_listener
+    if mouse_listener is None:
+        mouse_listener = pynput_mouse.Listener(on_click=on_mouse_click)
+        mouse_listener.start()
+
+
+def stop_mouse_listener() -> None:
+    global mouse_listener
+    if mouse_listener is not None:
+        mouse_listener.stop()
+        mouse_listener = None
+
+
+def start_input_listeners() -> None:
+    start_keyboard_listener()
+    start_mouse_listener()
+
+
+def stop_input_listeners() -> None:
+    stop_mouse_listener()
+    stop_keyboard_listener()
 
 
 def describe_device(index: int | None) -> tuple[str, bool]:
@@ -805,10 +1001,10 @@ refresh_device_list()
 class AudioRecorder:
     def __init__(
         self,
-        device_index: Optional[int],
+        device_index: int | None,
         buffer: list,
         buffer_lock: threading.Lock,
-        on_chunk: Optional[Callable[[np.ndarray], None]] = None,
+        on_chunk: Callable[[np.ndarray], None] | None = None,
     ):
         self.stream = None
         self.device_index = device_index
@@ -945,7 +1141,7 @@ def resample_pcm16_mono(pcm: np.ndarray, src_rate: int, dst_rate: int) -> np.nda
         return pcm.astype(np.int16, copy=False)
     src = pcm.astype(np.float32)
     src_index = np.arange(src.shape[0], dtype=np.float32)
-    dst_len = max(1, int(round(src.shape[0] * dst_rate / src_rate)))
+    dst_len = max(1, round(src.shape[0] * dst_rate / src_rate))
     dst_index = np.linspace(0, max(0, src.shape[0] - 1), num=dst_len, dtype=np.float32)
     dst = np.interp(dst_index, src_index, src)
     return np.clip(np.round(dst), -32768, 32767).astype(np.int16)
@@ -980,7 +1176,7 @@ def transcribe_pcm16_with_models(
     if prompt:
         request_args["prompt"] = prompt
 
-    last_error: Optional[BaseException] = None
+    last_error: BaseException | None = None
     for model_name in model_candidates:
         try:
             wav_bytes.seek(0)
@@ -1081,7 +1277,7 @@ def transcribe_with_gpt4o_realtime(chunks: list) -> str:
 def transcribe_with_gpt4o_realtime_stream_chunked(
     audio_queue: "queue.Queue[np.ndarray]",
     stop_event: threading.Event,
-    on_delta: Optional[Callable[[str], None]] = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> str:
     """Legacy local chunking path (retained for rollback); strict mode does not call this."""
     dep_error = realtime_dependency_error()
@@ -1115,7 +1311,7 @@ def transcribe_with_gpt4o_realtime_stream_chunked(
 
         while True:
             should_finish = stop_event.is_set() and audio_queue.empty()
-            chunk: Optional[np.ndarray] = None
+            chunk: np.ndarray | None = None
             if not should_finish:
                 try:
                     chunk = audio_queue.get(timeout=0.05)
@@ -1187,7 +1383,7 @@ def transcribe_with_gpt4o_realtime_stream_chunked(
 def transcribe_with_gpt4o_realtime_stream_server_vad(
     audio_queue: "queue.Queue[np.ndarray]",
     stop_event: threading.Event,
-    on_delta: Optional[Callable[[str], None]] = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> str:
     try:
         from websockets.sync.client import connect
@@ -1196,7 +1392,7 @@ def transcribe_with_gpt4o_realtime_stream_server_vad(
         return ""
 
     model_candidates = realtime_transcribe_model_candidates()
-    last_error: Optional[BaseException] = None
+    last_error: BaseException | None = None
     for model_name in model_candidates:
         try:
             ws_url = REALTIME_WS_URL
@@ -1341,7 +1537,7 @@ def transcribe_with_gpt4o_realtime_stream_server_vad(
 def transcribe_with_gpt4o_realtime_stream(
     audio_queue: "queue.Queue[np.ndarray]",
     stop_event: threading.Event,
-    on_delta: Optional[Callable[[str], None]] = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> str:
     text = transcribe_with_gpt4o_realtime_stream_server_vad(
         audio_queue,
@@ -1366,7 +1562,9 @@ def transcribe_audio(chunks: list, engine: str) -> str:
 def begin_session_start(
     mode: str,
     hotkey_name: str,
-    device_index: Optional[int],
+    hotkey_kind: str,
+    hotkey_tokens: tuple[str, ...],
+    device_index: int | None,
     device_label: str,
 ) -> bool:
     with state.lock:
@@ -1376,7 +1574,7 @@ def begin_session_start(
     try:
         threading.Thread(
             target=start_listening,
-            args=(mode, hotkey_name, device_index, device_label),
+            args=(mode, hotkey_name, hotkey_kind, hotkey_tokens, device_index, device_label),
             daemon=True,
         ).start()
     except Exception:
@@ -1389,6 +1587,8 @@ def begin_session_start(
 def start_listening(
     mode: str,
     hotkey_name: str,
+    hotkey_kind: str,
+    hotkey_tokens: tuple[str, ...],
     device_index: int | None,
     device_label: str,
 ):
@@ -1420,6 +1620,8 @@ def start_listening(
         state.last_audio_rms = 0.0
         state.mode = mode
         state.active_hotkey = hotkey_name
+        state.active_hotkey_kind = hotkey_kind
+        state.active_hotkey_tokens = hotkey_tokens
         state.active_device_label = label_text
     update_tray_status()
 
@@ -1429,20 +1631,22 @@ def start_listening(
     label = "Dictate" if mode == MODE_DICTATION else "Log"
     action = "Tap" if toggle_mode else "Hold"
     use_realtime_streaming = transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME
-    realtime_worker: Optional[threading.Thread] = None
-    realtime_queue: Optional[queue.Queue[np.ndarray]] = None
-    realtime_stop_event: Optional[threading.Event] = None
+    realtime_worker: threading.Thread | None = None
+    realtime_queue: queue.Queue[np.ndarray] | None = None
+    realtime_stop_event: threading.Event | None = None
     realtime_result: dict[str, str] = {"text": ""}
     realtime_delta_parts: list[str] = []
     realtime_delta_lock = threading.Lock()
     with state.output_condition:
         session_is_next_output = state.next_output_session_id == session_id
     live_typing_enabled = (
-        use_realtime_streaming and mode == MODE_DICTATION and REALTIME_LIVE_TYPING_ENABLED
+        use_realtime_streaming
+        and mode == MODE_DICTATION
+        and REALTIME_LIVE_TYPING_ENABLED
         and session_is_next_output
     )
 
-    on_audio_chunk: Optional[Callable[[np.ndarray], None]] = None
+    on_audio_chunk: Callable[[np.ndarray], None] | None = None
     if use_realtime_streaming:
         realtime_queue = queue.Queue(maxsize=512)
         realtime_stop_event = threading.Event()
@@ -1453,13 +1657,13 @@ def start_listening(
             if not live_typing_enabled:
                 return
             try:
-                keyboard.write(delta_text, delay=0)
+                type_text_direct(delta_text)
             except Exception as exc:  # pylint: disable=broad-except
                 log("[Realtime] Live typing output failed, retrying via paste:", exc)
                 try:
                     pyperclip.copy(delta_text)
                     time.sleep(0.01)
-                    keyboard.press_and_release("ctrl+v")
+                    send_paste_shortcut()
                 except Exception as paste_exc:  # pylint: disable=broad-except
                     log("[Realtime] Live typing paste fallback failed:", paste_exc)
 
@@ -1503,6 +1707,8 @@ def start_listening(
                 state.session_start_pending = False
                 state.is_listening = False
                 state.active_hotkey = ""
+                state.active_hotkey_kind = ""
+                state.active_hotkey_tokens = ()
                 state.active_device_label = ""
                 state.should_stop = False
                 state.muted_warning = False
@@ -1550,6 +1756,8 @@ def start_listening(
             state.session_start_pending = False
             state.is_listening = False
             state.active_hotkey = ""
+            state.active_hotkey_kind = ""
+            state.active_hotkey_tokens = ()
             state.active_device_label = ""
             state.should_stop = False
             state.muted_warning = False
@@ -1568,13 +1776,21 @@ def start_listening(
     transcribe_error: Exception | None = None
     final_text = ""
     try:
-        if use_realtime_streaming and realtime_worker is not None and realtime_stop_event is not None:
+        if (
+            use_realtime_streaming
+            and realtime_worker is not None
+            and realtime_stop_event is not None
+        ):
             realtime_stop_event.set()
             join_timeout_s = max(6.0, min(20.0, audio_duration_s + 4.0))
             realtime_worker.join(timeout=join_timeout_s)
             if realtime_worker.is_alive():
-                log("[Realtime] Stream worker timed out; strict server-side mode will not fall back.")
-                log("[Realtime] Check network stability and realtime model access for your API key.")
+                log(
+                    "[Realtime] Stream worker timed out; strict server-side mode will not fall back."
+                )
+                log(
+                    "[Realtime] Check network stability and realtime model access for your API key."
+                )
                 transcript_text = ""
                 transcription_engine_used = TRANSCRIPTION_ENGINE_GPT4O_REALTIME
             else:
@@ -1635,7 +1851,9 @@ def start_listening(
                     if live_typing_enabled:
                         with realtime_delta_lock:
                             live_text = "".join(realtime_delta_parts)
-                        live_applied = try_apply_live_dictation_correction(live_text, prepared_final)
+                        live_applied = try_apply_live_dictation_correction(
+                            live_text, prepared_final
+                        )
                         if live_applied:
                             log("[Realtime] Live dictation finalized in place.")
                     if live_typing_enabled and live_text and not live_applied:
@@ -1715,16 +1933,23 @@ def handle_spacebar_press() -> None:
 
 def get_key_name(key) -> str:
     if isinstance(key, pynput_keyboard.KeyCode):
-        return (key.char or "").upper()
+        return canonicalize_hotkey_token(key.char or "")
     try:
         name = key.name
     except AttributeError:
         return ""
-    return name.upper() if name else ""
+    return canonicalize_hotkey_token(name or "")
 
 
 def is_shift_key_name(key_name: str) -> bool:
-    return key_name.startswith("SHIFT")
+    return key_name == "SHIFT"
+
+
+def dictation_uses_system_audio() -> bool:
+    with state.lock:
+        shift_active = bool(state.shift_keys_down)
+        uses_shift_in_hotkey = "SHIFT" in state.dictation_hotkey_tokens
+    return shift_active and not uses_shift_in_hotkey
 
 
 def start_worklog_after_hold(press_token: int) -> None:
@@ -1740,7 +1965,14 @@ def start_worklog_after_hold(press_token: int) -> None:
             return
         device_index = state.worklog_device_index
         device_label = state.worklog_device_label
-    begin_session_start(MODE_WORKLOG, HOTKEY_WORKLOG, device_index, device_label)
+    begin_session_start(
+        MODE_WORKLOG,
+        HOTKEY_WORKLOG,
+        HOTKEY_KIND_KEYBOARD,
+        (HOTKEY_WORKLOG,),
+        device_index,
+        device_label,
+    )
 
 
 def on_press(key):
@@ -1748,27 +1980,49 @@ def on_press(key):
     if not key_name:
         return
 
-    if is_shift_key_name(key_name):
-        with state.lock:
-            state.shift_keys_down.add(key_name)
-        return
-
     if key_name == "SPACE":
         handle_spacebar_press()
-        return
 
     double_tap = False
+    dictation_start = False
     worklog_start_immediate = False
-    worklog_press_token: Optional[int] = None
-    worklog_device_index: Optional[int] = None
+    worklog_press_token: int | None = None
+    dictation_hotkey_kind = HOTKEY_KIND_KEYBOARD
+    dictation_hotkey_tokens: tuple[str, ...] = ()
+    dictation_device_index: int | None = None
+    dictation_device_label = ""
+    worklog_device_index: int | None = None
     worklog_device_label = ""
     with state.lock:
+        state.pressed_keys.add(key_name)
+        if is_shift_key_name(key_name):
+            state.shift_keys_down.add(key_name)
         if state.is_listening:
-            if state.toggle_mode_enabled and key_name == state.active_hotkey:
+            if (
+                state.toggle_mode_enabled
+                and state.active_hotkey_kind == HOTKEY_KIND_KEYBOARD
+                and key_name in state.active_hotkey_tokens
+                and state.pressed_keys == set(state.active_hotkey_tokens)
+            ):
                 state.should_stop = True
             return
         if state.session_start_pending:
             return
+        dictation_tokens = set(state.dictation_hotkey_tokens)
+        pressed_matches_dictation = state.pressed_keys == dictation_tokens
+        pressed_matches_shift_dictation = (
+            "SHIFT" not in dictation_tokens and state.pressed_keys == (dictation_tokens | {"SHIFT"})
+        )
+        if (
+            state.dictation_hotkey_kind == HOTKEY_KIND_KEYBOARD
+            and dictation_tokens
+            and (pressed_matches_dictation or pressed_matches_shift_dictation)
+        ):
+            dictation_start = True
+            dictation_hotkey_kind = state.dictation_hotkey_kind
+            dictation_hotkey_tokens = state.dictation_hotkey_tokens
+            dictation_device_index = state.dictation_device_index
+            dictation_device_label = state.dictation_device_label
         if key_name == HOTKEY_WORKLOG:
             if state.toggle_mode_enabled:
                 worklog_start_immediate = True
@@ -1791,25 +2045,33 @@ def on_press(key):
         open_work_log()
         return
 
-    if key_name == HOTKEY_DICTATION:
-        with state.lock:
-            shift_active = bool(state.shift_keys_down)
-            device_index = state.dictation_device_index
-            device_label = state.dictation_device_label
-        if shift_active:
-            device_index, device_label, ok = resolve_system_audio_input_device()
+    if dictation_start:
+        session_hotkey_tokens = dictation_hotkey_tokens
+        if dictation_uses_system_audio():
+            dictation_device_index, dictation_device_label, ok = resolve_system_audio_input_device()
             if not ok:
                 log(
                     "[Audio] System audio capture unavailable."
                     f" No input device matched '{system_audio_search_hint()}'."
                 )
                 return
-        begin_session_start(MODE_DICTATION, HOTKEY_DICTATION, device_index, device_label)
-    elif key_name == HOTKEY_WORKLOG:
+            session_hotkey_tokens = canonicalize_hotkey_tokens([*dictation_hotkey_tokens, "SHIFT"])
+        begin_session_start(
+            MODE_DICTATION,
+            HOTKEY_DICTATION,
+            dictation_hotkey_kind,
+            session_hotkey_tokens,
+            dictation_device_index,
+            dictation_device_label,
+        )
+
+    if key_name == HOTKEY_WORKLOG:
         if worklog_start_immediate:
             begin_session_start(
                 MODE_WORKLOG,
                 HOTKEY_WORKLOG,
+                HOTKEY_KIND_KEYBOARD,
+                (HOTKEY_WORKLOG,),
                 worklog_device_index,
                 worklog_device_label,
             )
@@ -1826,18 +2088,16 @@ def on_release(key):
     if not key_name:
         return
 
-    if is_shift_key_name(key_name):
-        with state.lock:
-            state.shift_keys_down.discard(key_name)
-        return
-
     now = time.monotonic()
-    if key_name == HOTKEY_WORKLOG:
-        with state.lock:
+    with state.lock:
+        if key_name == HOTKEY_WORKLOG:
             if state.worklog_double_tap_active:
                 state.worklog_double_tap_active = False
                 state.worklog_press_time = 0.0
                 state.worklog_is_pressed = False
+                state.pressed_keys.discard(key_name)
+                if is_shift_key_name(key_name):
+                    state.shift_keys_down.discard(key_name)
                 return
             press_time = state.worklog_press_time
             state.worklog_press_time = 0.0
@@ -1846,11 +2106,60 @@ def on_release(key):
                 state.last_worklog_tap_time = now
             else:
                 state.last_worklog_tap_time = 0.0
+        if state.toggle_mode_enabled:
+            state.pressed_keys.discard(key_name)
+            if is_shift_key_name(key_name):
+                state.shift_keys_down.discard(key_name)
+            return
+        if (
+            state.is_listening
+            and state.active_hotkey_kind == HOTKEY_KIND_KEYBOARD
+            and key_name in state.active_hotkey_tokens
+        ):
+            state.should_stop = True
+        state.pressed_keys.discard(key_name)
+        if is_shift_key_name(key_name):
+            state.shift_keys_down.discard(key_name)
+
+
+def on_mouse_click(_x, _y, button, pressed):
+    if button != DICTATION_MOUSE_BUTTON:
+        return
+
+    if pressed:
+        with state.lock:
+            if state.is_listening:
+                if state.toggle_mode_enabled and state.active_hotkey_kind == HOTKEY_KIND_MOUSE:
+                    state.should_stop = True
+                return
+            if state.session_start_pending or state.dictation_hotkey_kind != HOTKEY_KIND_MOUSE:
+                return
+            device_index = state.dictation_device_index
+            device_label = state.dictation_device_label
+        if dictation_uses_system_audio():
+            device_index, device_label, ok = resolve_system_audio_input_device()
+            if not ok:
+                log(
+                    "[Audio] System audio capture unavailable."
+                    f" No input device matched '{system_audio_search_hint()}'."
+                )
+                return
+        begin_session_start(
+            MODE_DICTATION,
+            HOTKEY_DICTATION,
+            HOTKEY_KIND_MOUSE,
+            (),
+            device_index,
+            device_label,
+        )
+        return
 
     with state.lock:
-        if state.toggle_mode_enabled:
-            return
-        if state.is_listening and key_name == state.active_hotkey:
+        if (
+            not state.toggle_mode_enabled
+            and state.is_listening
+            and state.active_hotkey_kind == HOTKEY_KIND_MOUSE
+        ):
             state.should_stop = True
 
 
@@ -2046,6 +2355,96 @@ def apply_bells_preset(_icon=None, _item=None) -> None:
     refresh_tray_menu()
 
 
+def is_systemd_managed() -> bool:
+    value = os.getenv(SYSTEMD_MANAGED_ENV, "")
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def run_systemd_action(action: str) -> bool:
+    try:
+        subprocess.run(
+            ["systemctl", "--user", action, SYSTEMD_SERVICE_NAME],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        log(f"[Tray] Unable to {action} {SYSTEMD_SERVICE_NAME}:", exc)
+        return False
+    return True
+
+
+def parse_hotkey_capture_output(output: str) -> dict[str, Any]:
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def prompt_for_hotkey(_icon=None, _item=None) -> None:
+    if not HOTKEY_CAPTURE_HELPER_PATH.exists():
+        log(f"[Tray] Hotkey capture helper not found: {HOTKEY_CAPTURE_HELPER_PATH}")
+        return
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(HOTKEY_CAPTURE_HELPER_PATH)],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=str(SCRIPT_DIR),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        log("[Tray] Unable to launch the hotkey capture helper:", exc)
+        return
+
+    payload = parse_hotkey_capture_output(completed.stdout)
+    if not payload.get("accepted"):
+        log("[Tray] Hotkey change canceled.")
+        return
+
+    tokens = canonicalize_hotkey_tokens(payload.get("tokens", []))
+    if not tokens:
+        log("[Tray] No capturable hotkey was drafted.")
+        return
+
+    set_dictation_hotkey(HOTKEY_KIND_KEYBOARD, tokens)
+    log(f"[Tray] Dictation hotkey set to {dictation_hotkey_summary()}.")
+
+
+def use_touchpad_hotkey(_icon=None, _item=None) -> None:
+    set_dictation_hotkey(HOTKEY_KIND_MOUSE)
+    log(f"[Tray] Dictation hotkey set to {DEFAULT_DICTATION_HOTKEY_LABEL}.")
+
+
+def quit_app(icon: TrayIconLike | None = None, _item=None) -> None:
+    if is_systemd_managed():
+        run_systemd_action("stop")
+        return
+    tray_exit(icon or tray_icon)
+
+
+def restart_app(icon: TrayIconLike | None = None, _item=None) -> None:
+    if is_systemd_managed():
+        run_systemd_action("restart")
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, str(SCRIPT_DIR / "push_to_talk_realtime.py")],
+            cwd=str(SCRIPT_DIR),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        log("[Tray] Unable to restart the app:", exc)
+        return
+    tray_exit(icon or tray_icon)
+
+
 def refresh_audio_devices(_icon=None, _item=None) -> None:
     refresh_device_list()
     rebuild_tray_menu()
@@ -2170,8 +2569,14 @@ def build_options_menu() -> pystray.Menu:
 
 def build_menu() -> pystray.Menu:
     return pystray.Menu(
-        pystray.MenuItem(f"Dictation hotkey: {HOTKEY_DICTATION}", None, enabled=False),
+        pystray.MenuItem(f"Dictation hotkey: {dictation_hotkey_summary()}", None, enabled=False),
         pystray.MenuItem(f"Work log hotkey: {HOTKEY_WORKLOG}", None, enabled=False),
+        pystray.MenuItem("Set Hotkey...", prompt_for_hotkey),
+        pystray.MenuItem(
+            "Use Three-Finger Touchpad Press",
+            use_touchpad_hotkey,
+            checked=lambda _item: state.dictation_hotkey_kind == HOTKEY_KIND_MOUSE,
+        ),
         pystray.MenuItem("Default (no frills)", apply_default_preset),
         pystray.MenuItem("Bells and whistles", apply_bells_preset),
         pystray.MenuItem("Options", build_options_menu()),
@@ -2181,14 +2586,15 @@ def build_menu() -> pystray.Menu:
         pystray.MenuItem("Work log input device", build_device_menu(MODE_WORKLOG)),
         pystray.MenuItem("Refresh audio devices", refresh_audio_devices),
         pystray.MenuItem("Open work log", open_work_log),
-        pystray.MenuItem("Exit", tray_exit),
+        pystray.MenuItem("Restart", restart_app),
+        pystray.MenuItem("Quit", quit_app),
     )
 
 
 def create_tray_icon_image(
     size: int = TRAY_ICON_SIZE,
-    color: Tuple[int, int, int, int] = TRAY_COLOR_READY,
-    spinner_step: Optional[int] = None,
+    color: tuple[int, int, int, int] = TRAY_COLOR_READY,
+    spinner_step: int | None = None,
 ) -> Image.Image:
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -2280,12 +2686,14 @@ def tray_setup(_icon: TrayIconLike) -> None:
         log("[Transcription engine] Strict server-side realtime mode enabled (no local fallback).")
     refresh_tray_menu()
     start_tray_animation_loop()
-    start_keyboard_listener()
+    start_input_listeners()
 
 
-def tray_exit(icon: TrayIconLike, _item=None) -> None:
+def tray_exit(icon: TrayIconLike | None, _item=None) -> None:
     shutdown_event.set()
-    stop_keyboard_listener()
+    stop_input_listeners()
+    if icon is None:
+        return
     icon.visible = False
     icon.stop()
 
@@ -2306,7 +2714,7 @@ def main() -> None:
         log("\nExiting...")
         tray_exit(tray_icon)
     finally:
-        stop_keyboard_listener()
+        stop_input_listeners()
         shutdown_event.set()
 
 

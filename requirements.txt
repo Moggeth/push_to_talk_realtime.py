@@ -6,3 +6,4 @@ pyperclip
 pystray
 python-dotenv
 sounddevice
+websockets

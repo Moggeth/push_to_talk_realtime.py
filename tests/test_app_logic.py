@@ -47,6 +47,7 @@ def reset_app_state(monkeypatch, tmp_path: Path):
     app.state = app.SessionState()
     app.tray_icon = None
     app.keyboard_listener = None
+    app.mouse_listener = None
     app.DEVICE_LIST = []
     app.shutdown_event.clear()
     monkeypatch.setattr(app, "WORK_LOG_PATH", tmp_path / "work_log.txt")
@@ -367,6 +368,9 @@ def test_apply_persisted_settings_loads_hotkeys_and_engine(monkeypatch, tmp_path
     assert app.state.transcription_engine == app.TRANSCRIPTION_ENGINE_GPT4O_REALTIME
     assert app.HOTKEY_DICTATION == "F15"
     assert app.HOTKEY_WORKLOG == "F16"
+    assert app.state.dictation_hotkey_kind == app.HOTKEY_KIND_KEYBOARD
+    assert app.state.dictation_hotkey_tokens == ("F15",)
+    assert app.state.dictation_hotkey_label == "F15"
 
 
 def test_save_settings_to_disk_includes_hotkeys(monkeypatch, tmp_path: Path):
@@ -376,12 +380,17 @@ def test_save_settings_to_disk_includes_hotkeys(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(app, "HOTKEY_WORKLOG", "F18")
     with app.state.lock:
         app.state.transcription_engine = app.TRANSCRIPTION_ENGINE_WHISPER
+        app.state.dictation_hotkey_kind = app.HOTKEY_KIND_KEYBOARD
+        app.state.dictation_hotkey_tokens = ("F17",)
+        app.state.dictation_hotkey_label = "F17"
 
     app.save_settings_to_disk()
 
     saved = json.loads(settings_path.read_text(encoding="utf-8"))
     assert saved == {
         "transcription_engine": app.TRANSCRIPTION_ENGINE_WHISPER,
+        "dictation_hotkey_kind": app.HOTKEY_KIND_KEYBOARD,
+        "dictation_hotkey_tokens": ["F17"],
         "dictation_hotkey": "F17",
         "worklog_hotkey": "F18",
     }
@@ -417,6 +426,49 @@ def test_start_and_stop_keyboard_listener_manage_single_listener(monkeypatch):
     assert listener.on_release is app.on_release
     assert events == ["start", "stop"]
     assert app.keyboard_listener is None
+
+
+def test_start_and_stop_mouse_listener_manage_single_listener(monkeypatch):
+    events = []
+
+    class FakeListener:
+        def __init__(self, on_click):
+            self.on_click = on_click
+            self.started = 0
+            self.stopped = 0
+
+        def start(self):
+            self.started += 1
+            events.append("start")
+
+        def stop(self):
+            self.stopped += 1
+            events.append("stop")
+
+    monkeypatch.setattr(app.pynput_mouse, "Listener", FakeListener)
+
+    app.start_mouse_listener()
+    listener = app.mouse_listener
+    app.start_mouse_listener()
+    app.stop_mouse_listener()
+
+    assert isinstance(listener, FakeListener)
+    assert listener.on_click is app.on_mouse_click
+    assert events == ["start", "stop"]
+    assert app.mouse_listener is None
+
+
+def test_start_and_stop_input_listeners_run_both(monkeypatch):
+    calls = []
+    monkeypatch.setattr(app, "start_keyboard_listener", lambda: calls.append("keyboard-start"))
+    monkeypatch.setattr(app, "start_mouse_listener", lambda: calls.append("mouse-start"))
+    monkeypatch.setattr(app, "stop_keyboard_listener", lambda: calls.append("keyboard-stop"))
+    monkeypatch.setattr(app, "stop_mouse_listener", lambda: calls.append("mouse-stop"))
+
+    app.start_input_listeners()
+    app.stop_input_listeners()
+
+    assert calls == ["keyboard-start", "mouse-start", "mouse-stop", "keyboard-stop"]
 
 
 def test_describe_device_includes_hostapi_name(monkeypatch):
@@ -766,7 +818,14 @@ def test_on_press_dictation_starts_worker_thread(monkeypatch):
     assert len(FakeThread.created) == 1
     created = FakeThread.created[0]
     assert created.target is app.start_listening
-    assert created.args == (app.MODE_DICTATION, app.HOTKEY_DICTATION, 4, "USB Mic")
+    assert created.args == (
+        app.MODE_DICTATION,
+        app.HOTKEY_DICTATION,
+        app.HOTKEY_KIND_KEYBOARD,
+        (app.HOTKEY_DICTATION,),
+        4,
+        "USB Mic",
+    )
     assert created.daemon is True
     assert created.started is True
 
@@ -785,7 +844,14 @@ def test_on_press_shift_dictation_uses_system_audio_device(monkeypatch):
     assert len(FakeThread.created) == 1
     created = FakeThread.created[0]
     assert created.target is app.start_listening
-    assert created.args == (app.MODE_DICTATION, app.HOTKEY_DICTATION, 17, "Stereo Mix")
+    assert created.args == (
+        app.MODE_DICTATION,
+        app.HOTKEY_DICTATION,
+        app.HOTKEY_KIND_KEYBOARD,
+        ("SHIFT", app.HOTKEY_DICTATION),
+        17,
+        "Stereo Mix",
+    )
 
 
 def test_on_press_shift_dictation_skips_when_system_audio_missing(monkeypatch):
@@ -851,6 +917,8 @@ def test_on_press_in_toggle_mode_stops_active_session(monkeypatch):
         app.state.is_listening = True
         app.state.toggle_mode_enabled = True
         app.state.active_hotkey = app.HOTKEY_DICTATION
+        app.state.active_hotkey_kind = app.HOTKEY_KIND_KEYBOARD
+        app.state.active_hotkey_tokens = (app.HOTKEY_DICTATION,)
 
     app.on_press(make_key(app.HOTKEY_DICTATION))
 
@@ -874,6 +942,8 @@ def test_on_release_clears_last_tap_for_long_press_and_respects_toggle_mode(monk
         app.state.toggle_mode_enabled = True
         app.state.is_listening = True
         app.state.active_hotkey = app.HOTKEY_DICTATION
+        app.state.active_hotkey_kind = app.HOTKEY_KIND_KEYBOARD
+        app.state.active_hotkey_tokens = (app.HOTKEY_DICTATION,)
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.5)
 
     app.on_release(make_key(app.HOTKEY_WORKLOG))
@@ -887,6 +957,8 @@ def test_on_release_sets_should_stop_for_matching_hotkey():
     with app.state.lock:
         app.state.is_listening = True
         app.state.active_hotkey = app.HOTKEY_DICTATION
+        app.state.active_hotkey_kind = app.HOTKEY_KIND_KEYBOARD
+        app.state.active_hotkey_tokens = (app.HOTKEY_DICTATION,)
 
     app.on_release(make_key(app.HOTKEY_DICTATION))
 
@@ -899,6 +971,40 @@ def test_on_release_shift_clears_modifier_state():
     app.on_release(make_key("SHIFT"))
 
     assert app.state.shift_keys_down == set()
+    assert app.state.pressed_keys == set()
+
+
+def test_on_mouse_click_starts_mouse_dictation(monkeypatch):
+    monkeypatch.setattr(app.threading, "Thread", FakeThread)
+    app.state.dictation_hotkey_kind = app.HOTKEY_KIND_MOUSE
+    app.state.dictation_hotkey_tokens = ()
+    app.state.dictation_hotkey_label = app.DEFAULT_DICTATION_HOTKEY_LABEL
+    app.state.dictation_device_index = 12
+    app.state.dictation_device_label = "Trackpad Mic"
+
+    app.on_mouse_click(0, 0, app.DICTATION_MOUSE_BUTTON, True)
+
+    assert len(FakeThread.created) == 1
+    created = FakeThread.created[0]
+    assert created.target is app.start_listening
+    assert created.args == (
+        app.MODE_DICTATION,
+        app.HOTKEY_DICTATION,
+        app.HOTKEY_KIND_MOUSE,
+        (),
+        12,
+        "Trackpad Mic",
+    )
+
+
+def test_on_mouse_click_release_stops_mouse_session():
+    with app.state.lock:
+        app.state.is_listening = True
+        app.state.active_hotkey_kind = app.HOTKEY_KIND_MOUSE
+
+    app.on_mouse_click(0, 0, app.DICTATION_MOUSE_BUTTON, False)
+
+    assert app.state.should_stop is True
 
 
 def test_on_release_clears_double_tap_flag_without_recording_timestamp(monkeypatch):
@@ -998,8 +1104,10 @@ def test_menu_builders_include_expected_top_level_items(monkeypatch):
         "Mute monitor",
     ]
     assert [item.text for item in menu] == [
-        f"Dictation hotkey: {app.HOTKEY_DICTATION}",
+        f"Dictation hotkey: {app.dictation_hotkey_summary()}",
         f"Work log hotkey: {app.HOTKEY_WORKLOG}",
+        "Set Hotkey...",
+        "Use Three-Finger Touchpad Press",
         "Default (no frills)",
         "Bells and whistles",
         "Options",
@@ -1009,7 +1117,8 @@ def test_menu_builders_include_expected_top_level_items(monkeypatch):
         "Work log input device",
         "Refresh audio devices",
         "Open work log",
-        "Exit",
+        "Restart",
+        "Quit",
     ]
 
 
@@ -1087,7 +1196,9 @@ def test_tray_setup_marks_icon_visible_and_starts_listener(monkeypatch):
     icon = FakeTrayIcon()
     monkeypatch.setattr(app, "log", lambda *args: logs.append(" ".join(map(str, args))))
     monkeypatch.setattr(app, "refresh_tray_menu", lambda: refresh_calls.append("refresh"))
-    monkeypatch.setattr(app, "start_keyboard_listener", lambda: start_calls.append("start"))
+    monkeypatch.setattr(app, "start_input_listeners", lambda: start_calls.append("start"))
+    monkeypatch.setattr(app, "enforce_transcription_engine_dependencies", lambda: None)
+    monkeypatch.setattr(app, "start_transcription_warmup", lambda: None)
 
     app.tray_setup(icon)
 
@@ -1106,7 +1217,7 @@ def test_tray_exit_stops_listener_hides_icon_and_sets_shutdown(monkeypatch):
     stop_calls = []
     icon = FakeTrayIcon()
     icon.visible = True
-    monkeypatch.setattr(app, "stop_keyboard_listener", lambda: stop_calls.append("stop"))
+    monkeypatch.setattr(app, "stop_input_listeners", lambda: stop_calls.append("stop"))
 
     app.tray_exit(icon)
 
@@ -1131,7 +1242,7 @@ def test_main_builds_icon_and_runs_tray(monkeypatch):
     monkeypatch.setattr(app, "create_tray_icon_image", lambda: "icon")
     monkeypatch.setattr(app, "build_menu", lambda: "menu")
     monkeypatch.setattr(app.pystray, "Icon", FakeIcon)
-    monkeypatch.setattr(app, "stop_keyboard_listener", lambda: calls.append(("stop",)))
+    monkeypatch.setattr(app, "stop_input_listeners", lambda: calls.append(("stop",)))
 
     app.main()
 
@@ -1161,9 +1272,53 @@ def test_main_handles_keyboard_interrupt_by_exiting_tray(monkeypatch):
     monkeypatch.setattr(app, "create_tray_icon_image", lambda: "icon")
     monkeypatch.setattr(app, "build_menu", lambda: "menu")
     monkeypatch.setattr(app.pystray, "Icon", FakeIcon)
-    monkeypatch.setattr(app, "stop_keyboard_listener", lambda: calls.append("listener-stop"))
+    monkeypatch.setattr(app, "stop_input_listeners", lambda: calls.append("listener-stop"))
     monkeypatch.setattr(app, "log", lambda *args: calls.append(" ".join(map(str, args))))
 
     app.main()
 
     assert calls == ["\nExiting...", "listener-stop", "stop", "listener-stop"]
+
+
+def test_use_touchpad_hotkey_sets_mouse_hotkey(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        app, "set_dictation_hotkey", lambda kind, tokens=(): calls.append((kind, tokens))
+    )
+
+    app.use_touchpad_hotkey()
+
+    assert calls == [(app.HOTKEY_KIND_MOUSE, ())]
+
+
+def test_prompt_for_hotkey_accepts_tokens(monkeypatch, tmp_path: Path):
+    calls = []
+    helper_path = tmp_path / "hotkey_capture_helper.py"
+    helper_path.write_text("# helper placeholder\n", encoding="utf-8")
+    monkeypatch.setattr(app, "HOTKEY_CAPTURE_HELPER_PATH", helper_path)
+    monkeypatch.setattr(
+        app.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout='{"accepted": true, "tokens": ["ctrl", "a"]}\n'
+        ),
+    )
+    monkeypatch.setattr(
+        app, "set_dictation_hotkey", lambda kind, tokens=(): calls.append((kind, tokens))
+    )
+    monkeypatch.setattr(app, "log", lambda *args: None)
+
+    app.prompt_for_hotkey()
+
+    assert calls == [(app.HOTKEY_KIND_KEYBOARD, ("CTRL", "A"))]
+
+
+def test_restart_and_quit_use_systemd_when_managed(monkeypatch):
+    actions = []
+    monkeypatch.setenv(app.SYSTEMD_MANAGED_ENV, "1")
+    monkeypatch.setattr(app, "run_systemd_action", lambda action: actions.append(action) or True)
+
+    app.restart_app()
+    app.quit_app()
+
+    assert actions == ["restart", "stop"]

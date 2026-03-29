@@ -1,10 +1,11 @@
-Push-to-talk Transcription (Windows)
-====================================
+Push-to-talk Transcription
+==========================
 
 Hold a hotkey to record from your microphone, transcribe audio, and paste
 the transcript into the active window. A second hotkey logs dictations as
 timestamped work entries. The app runs from a system tray icon with submenus
-for input device selection, punctuation rules, and QoL toggles.
+for input device selection, hotkey management, punctuation rules, and QoL
+toggles.
 
 This repository is standalone. It does not depend on Personal Package Manager,
 although external launchers can still start it by pointing at this checkout.
@@ -12,11 +13,13 @@ although external launchers can still start it by pointing at this checkout.
 Features
 --------
 - Push-to-talk dictation: record and paste on release.
+- Configurable dictation hotkey: set a single key or key combo from the tray menu, or switch back to the Linux touchpad three-finger press shortcut.
 - Shift-modified dictation: hold `Shift` while pressing the dictation hotkey to capture system audio instead of the microphone.
 - Work log capture: record and append a timestamped entry to `work_log.txt`.
 - Transcription engine toggle: choose Whisper or GPT-4o Realtime from the tray menu.
 - Realtime live dictation: GPT-4o Realtime streams server-side transcript deltas while you are still holding the hotkey.
 - Engine preference persistence: selected transcription engine is saved and restored on next launch.
+- Tray controls: `Set Hotkey...`, `Restart`, and `Quit`.
 - Busy tray feedback: tray icon shows a spinner while transcription is in progress.
 - Tray menu controls:
   - Select dictation/worklog input devices (including Stereo Mix).
@@ -30,12 +33,18 @@ Hotkeys
 - System audio dictation: hold `Shift + F13` to capture the currently playing system audio input (defaults to a Stereo Mix-style device when available).
 - Work log: `F14` by default
 - Work log: hold `F14` (more than ~0.25s) to record, or double-tap `F14` to open `work_log.txt`.
+- `Set Hotkey...` captures the exact drafted key or key combo and asks you to accept it before saving.
+- The dictation keyboard hotkey only fires when the drafted keys are the only keys being held, except for the special `Shift + hotkey` system-audio path.
+- Bare `Fn` usually cannot be captured on laptops because firmware handles it before the OS sees a normal key event.
 - Recommended Windows setup: map your mouse side button to `F13` in your mouse software. It is usually much less collision-prone than `F8`.
-- Override hotkeys with `DICTATION_HOTKEY` / `WORKLOG_HOTKEY`, or set `dictation_hotkey` / `worklog_hotkey` in `settings.json`.
+- Override hotkeys with `DICTATION_HOTKEY` / `WORKLOG_HOTKEY`, or set `dictation_hotkey`, `dictation_hotkey_kind`, `dictation_hotkey_tokens`, and `worklog_hotkey` in `settings.json`.
 - (Windows console only) Spacebar: toggle Stereo Mix for the work log input.
 
 Tray Menu
 ---------
+- Dictation hotkey / Work log hotkey: show the currently active shortcuts.
+- Set Hotkey...: opens a small capture window, shows the drafted key combo, then saves it only after you click `Accept`.
+- Use Three-Finger Touchpad Press: switches dictation back to the Linux touchpad middle-click path.
 - Default (no frills): reset QoL options to the original behavior.
 - Bells and whistles: enable beeps, status tooltip, and mute monitor.
 - Options:
@@ -55,7 +64,8 @@ Tray Menu
 - Work log input device: choose an input device (per-mode) + toggle Stereo Mix.
 - Refresh audio devices.
 - Open work log.
-- Exit.
+- Restart: restart the app, or restart the user service if the app is running under systemd.
+- Quit: exit the app, or stop the user service if the app is running under systemd.
 
 Setup
 -----
@@ -69,7 +79,7 @@ Ubuntu install commands (including system packages needed by audio/tray/clipboar
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-pip portaudio19-dev libportaudio2 libasound2-dev python3-gi gir1.2-ayatanaappindicator3-0.1 python3-xlib xclip
+sudo apt install -y python3-venv python3-pip portaudio19-dev libportaudio2 libasound2-dev gir1.2-ayatanaappindicator3-0.1 python3-xlib xclip
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -87,6 +97,21 @@ Run:
 ```powershell
 python .\push_to_talk_realtime.py
 ```
+
+Linux login startup
+-------------------
+If you want the tray app to start automatically on login, install the included
+user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp push-to-talk-realtime.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now push-to-talk-realtime.service
+```
+
+The service reads `~/.config/push-to-talk-realtime.env` for environment
+variables such as `OPENAI_API_KEY`.
 
 Development
 -----------
@@ -133,6 +158,7 @@ Environment variables:
 - `PUSH_TO_TALK_SETTINGS_PATH` (optional): override path for persisted tray settings (`settings.json` by default).
 - `DICTATION_HOTKEY` (optional): single-key trigger for dictation, default `F13`.
 - `WORKLOG_HOTKEY` (optional): single-key trigger for work log capture, default `F14`.
+- `PUSH_TO_TALK_SERVICE_NAME` (optional): service name used by the tray `Restart` / `Quit` actions, default `push-to-talk-realtime.service`.
 - `DICTATION_DEVICE` (optional): device index or name fragment for dictation.
 - `WORKLOG_DEVICE` (optional): device index or name fragment for work log.
 - `SYSTEM_AUDIO_DEVICE` (optional): device index or name fragment used by `Shift + DICTATION_HOTKEY`; if unset, the app searches for `STEREO_MIX_SEARCH`.
@@ -160,6 +186,7 @@ Notes and tips
 - System audio capture depends on a loopback-capable input device. On many Windows systems that is exposed as `Stereo Mix`; if yours uses a different name, set `SYSTEM_AUDIO_DEVICE`.
 - On Linux, paste injection does not require the root-only `keyboard` package.
   If simulated paste fails, the transcript still remains on the clipboard.
+- The `Set Hotkey...` dialog uses the Python standard library GUI toolkit so it can run on Windows, Ubuntu, and macOS without extra GUI Python packages.
 - The global spacebar shortcut for toggling Stereo Mix is disabled on Linux and
   macOS to avoid intercepting normal typing in other apps. Use the tray menu
   instead.
