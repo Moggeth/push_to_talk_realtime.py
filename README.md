@@ -6,6 +6,9 @@ the transcript into the active window. A second hotkey logs dictations as
 timestamped work entries. The app runs from a system tray icon with submenus
 for input device selection, punctuation rules, and QoL toggles.
 
+This repository is standalone. It does not depend on Personal Package Manager,
+although external launchers can still start it by pointing at this checkout.
+
 Features
 --------
 - Push-to-talk dictation: record and paste on release.
