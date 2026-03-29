@@ -219,10 +219,12 @@ class TrayIconLike(Protocol):
 class SessionState:
     is_listening: bool = False
     is_transcribing: bool = False
+    transcribing_session_count: int = 0
     session_start_pending: bool = False
     should_stop: bool = False
     transcript_final: str = ""
     lock: threading.Lock = field(default_factory=threading.Lock)
+    output_condition: threading.Condition = field(default_factory=threading.Condition)
     mode: str = MODE_DICTATION
     active_hotkey: str = ""
     active_device_label: str = ""
@@ -255,6 +257,7 @@ class SessionState:
     worklog_is_pressed: bool = False
     worklog_press_token: int = 0
     tray_spinner_step: int = 0
+    next_output_session_id: int = 1
     shift_keys_down: set[str] = field(default_factory=set)
 
 
@@ -497,6 +500,34 @@ def maybe_beep(pattern: list[tuple[int, int]]) -> None:
             winsound.Beep(hz, duration_ms)
     except Exception as exc:  # pylint: disable=broad-except
         log("[Beep error]", exc)
+
+
+def mark_transcription_started() -> None:
+    with state.lock:
+        state.transcribing_session_count += 1
+        state.is_transcribing = state.transcribing_session_count > 0
+    update_tray_status()
+
+
+def mark_transcription_finished(final_text: str = "") -> None:
+    with state.lock:
+        if final_text:
+            state.transcript_final = final_text
+        state.transcribing_session_count = max(0, state.transcribing_session_count - 1)
+        state.is_transcribing = state.transcribing_session_count > 0
+    update_tray_status()
+
+
+def wait_for_output_turn(session_id: int) -> None:
+    with state.output_condition:
+        while session_id != state.next_output_session_id:
+            state.output_condition.wait()
+
+
+def advance_output_turn() -> None:
+    with state.output_condition:
+        state.next_output_session_id += 1
+        state.output_condition.notify_all()
 
 
 def append_work_log_entry(text: str):
@@ -1339,7 +1370,7 @@ def begin_session_start(
     device_label: str,
 ) -> bool:
     with state.lock:
-        if state.is_listening or state.is_transcribing or state.session_start_pending:
+        if state.is_listening or state.session_start_pending:
             return False
         state.session_start_pending = True
     try:
@@ -1373,7 +1404,7 @@ def start_listening(
     buffer_lock = threading.Lock()
 
     with state.lock:
-        if state.is_listening or state.is_transcribing:
+        if state.is_listening:
             state.session_start_pending = False
             return
         state.session_counter += 1
@@ -1404,8 +1435,11 @@ def start_listening(
     realtime_result: dict[str, str] = {"text": ""}
     realtime_delta_parts: list[str] = []
     realtime_delta_lock = threading.Lock()
+    with state.output_condition:
+        session_is_next_output = state.next_output_session_id == session_id
     live_typing_enabled = (
         use_realtime_streaming and mode == MODE_DICTATION and REALTIME_LIVE_TYPING_ENABLED
+        and session_is_next_output
     )
 
     on_audio_chunk: Optional[Callable[[np.ndarray], None]] = None
@@ -1524,40 +1558,43 @@ def start_listening(
     with buffer_lock:
         chunks = [chunk.copy() for chunk in record_buffer]
 
-    with state.lock:
-        if state.active_session_id == session_id:
-            state.is_transcribing = True
-    update_tray_status()
+    mark_transcription_started()
     log(f"\n[Transcribing] {transcription_engine_label(transcription_engine)} request sent...")
 
     audio_duration_s = sum(len(chunk) for chunk in chunks) / SAMPLE_RATE if chunks else 0.0
     transcribe_start = time.perf_counter()
     transcript_text = ""
     transcription_engine_used = transcription_engine
-    if use_realtime_streaming and realtime_worker is not None and realtime_stop_event is not None:
-        realtime_stop_event.set()
-        join_timeout_s = max(6.0, min(20.0, audio_duration_s + 4.0))
-        realtime_worker.join(timeout=join_timeout_s)
-        if realtime_worker.is_alive():
-            log("[Realtime] Stream worker timed out; strict server-side mode will not fall back.")
-            log("[Realtime] Check network stability and realtime model access for your API key.")
-            transcript_text = ""
-            transcription_engine_used = TRANSCRIPTION_ENGINE_GPT4O_REALTIME
-        else:
-            transcript_text = (realtime_result.get("text", "") or "").strip()
-            if not transcript_text:
-                log("[Realtime] No transcript returned from server-side realtime.")
-                log(
-                    "[Realtime] Strict mode keeps realtime-only behavior; no Whisper fallback is applied."
-                )
+    transcribe_error: Exception | None = None
+    final_text = ""
+    try:
+        if use_realtime_streaming and realtime_worker is not None and realtime_stop_event is not None:
+            realtime_stop_event.set()
+            join_timeout_s = max(6.0, min(20.0, audio_duration_s + 4.0))
+            realtime_worker.join(timeout=join_timeout_s)
+            if realtime_worker.is_alive():
+                log("[Realtime] Stream worker timed out; strict server-side mode will not fall back.")
+                log("[Realtime] Check network stability and realtime model access for your API key.")
+                transcript_text = ""
                 transcription_engine_used = TRANSCRIPTION_ENGINE_GPT4O_REALTIME
-    else:
-        transcript_text = transcribe_audio(chunks, transcription_engine)
-        if (
-            transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME and transcript_text
-        ) or transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME:
-            transcription_engine_used = TRANSCRIPTION_ENGINE_GPT4O_REALTIME
-    final_text = apply_punctuation_options(transcript_text)
+            else:
+                transcript_text = (realtime_result.get("text", "") or "").strip()
+                if not transcript_text:
+                    log("[Realtime] No transcript returned from server-side realtime.")
+                    log(
+                        "[Realtime] Strict mode keeps realtime-only behavior; no Whisper fallback is applied."
+                    )
+                    transcription_engine_used = TRANSCRIPTION_ENGINE_GPT4O_REALTIME
+        else:
+            transcript_text = transcribe_audio(chunks, transcription_engine)
+            if (
+                transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME and transcript_text
+            ) or transcription_engine == TRANSCRIPTION_ENGINE_GPT4O_REALTIME:
+                transcription_engine_used = TRANSCRIPTION_ENGINE_GPT4O_REALTIME
+        final_text = apply_punctuation_options(transcript_text)
+    except Exception as exc:  # pylint: disable=broad-except
+        transcribe_error = exc
+        log("[Transcription error]", exc)
     transcribe_end = time.perf_counter()
 
     transcription_ms = (transcribe_end - transcribe_start) * 1000.0
@@ -1567,48 +1604,54 @@ def start_listening(
     word_count = len(final_text.split())
     wpm = word_count / total_minutes if total_minutes > 0 else 0.0
 
-    with state.lock:
-        if state.active_session_id == session_id:
+    with state.output_condition:
+        waiting_for_earlier_output = session_id != state.next_output_session_id
+    if waiting_for_earlier_output:
+        log(f"[Session {session_id}] Waiting for earlier transcript output.")
+    wait_for_output_turn(session_id)
+    try:
+        with state.lock:
             state.transcript_final = final_text
-            state.is_transcribing = False
-        is_active_session = state.active_session_id == session_id
-    update_tray_status()
-    if not is_active_session:
-        log("[Session] Discarding stale transcription result.")
-        return
 
-    used_label = transcription_engine_label(transcription_engine_used)
-    log(
-        f"[Metrics] {used_label} {transcription_ms:.0f} ms | "
-        f"WPM {wpm:.1f} (words={word_count}, audio={audio_duration_s * 1000:.0f} ms)"
-    )
+        if transcribe_error is not None:
+            log(f"[Session {session_id}] Transcription failed; skipping output.")
+            return
 
-    if final_text:
-        if mode == MODE_WORKLOG:
-            append_work_log_entry(final_text)
+        used_label = transcription_engine_label(transcription_engine_used)
+        log(
+            f"[Metrics] {used_label} {transcription_ms:.0f} ms | "
+            f"WPM {wpm:.1f} (words={word_count}, audio={audio_duration_s * 1000:.0f} ms)"
+        )
+
+        if final_text:
+            if mode == MODE_WORKLOG:
+                append_work_log_entry(final_text)
+            else:
+                log("\n[Final]:", final_text)
+                if PASTE_ON_RELEASE:
+                    prepared_final = prepare_clipboard_text(final_text)
+                    live_applied = False
+                    live_text = ""
+                    if live_typing_enabled:
+                        with realtime_delta_lock:
+                            live_text = "".join(realtime_delta_parts)
+                        live_applied = try_apply_live_dictation_correction(live_text, prepared_final)
+                        if live_applied:
+                            log("[Realtime] Live dictation finalized in place.")
+                    if live_typing_enabled and live_text and not live_applied:
+                        log(
+                            "[Realtime] Live text changed too much to auto-correct; skipped final paste to avoid duplicates."
+                        )
+                    elif not live_applied:
+                        if paste_text(final_text):
+                            log("[Pasted] Sent clipboard text to the active window.")
+                        else:
+                            log("[Clipboard] Transcript copied, but paste was not sent.")
         else:
-            log("\n[Final]:", final_text)
-            if PASTE_ON_RELEASE:
-                prepared_final = prepare_clipboard_text(final_text)
-                live_applied = False
-                live_text = ""
-                if live_typing_enabled:
-                    with realtime_delta_lock:
-                        live_text = "".join(realtime_delta_parts)
-                    live_applied = try_apply_live_dictation_correction(live_text, prepared_final)
-                    if live_applied:
-                        log("[Realtime] Live dictation finalized in place.")
-                if live_typing_enabled and live_text and not live_applied:
-                    log(
-                        "[Realtime] Live text changed too much to auto-correct; skipped final paste to avoid duplicates."
-                    )
-                elif not live_applied:
-                    if paste_text(final_text):
-                        log("[Pasted] Sent clipboard text to the active window.")
-                    else:
-                        log("[Clipboard] Transcript copied, but paste was not sent.")
-    else:
-        log("\n(No speech captured.)")
+            log("\n(No speech captured.)")
+    finally:
+        advance_output_turn()
+        mark_transcription_finished(final_text)
 
 
 # -------------------- Hotkey handling --------------------
@@ -1693,7 +1736,7 @@ def start_worklog_after_hold(press_token: int) -> None:
             return
         if state.worklog_double_tap_active:
             return
-        if state.is_listening or state.is_transcribing or state.session_start_pending:
+        if state.is_listening or state.session_start_pending:
             return
         device_index = state.worklog_device_index
         device_label = state.worklog_device_label
@@ -1724,7 +1767,7 @@ def on_press(key):
             if state.toggle_mode_enabled and key_name == state.active_hotkey:
                 state.should_stop = True
             return
-        if state.is_transcribing or state.session_start_pending:
+        if state.session_start_pending:
             return
         if key_name == HOTKEY_WORKLOG:
             if state.toggle_mode_enabled:

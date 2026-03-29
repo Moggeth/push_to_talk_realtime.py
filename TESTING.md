@@ -202,9 +202,10 @@ CI now runs:
 - Double-tap F14 while idle.
 - Expected: `work_log.txt` opens and no new recording starts.
 
-15) No overlap while transcribing
+15) Overlap while transcribing
 - Dictate once with F13, release, then press F13 again before the first transcript finishes.
-- Expected: the second press is ignored until the first transcript completes.
+- Expected: the second recording starts immediately.
+- Expected: both transcripts still appear, and they paste in the order the recordings were made.
 
 16) Mouse-side-button remap
 - Map a spare mouse button to `F13`, relaunch the app, then hold that button and speak.

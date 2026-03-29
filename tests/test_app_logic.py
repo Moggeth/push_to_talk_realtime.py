@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -302,6 +303,30 @@ def test_paste_text_returns_false_when_shortcut_fails(monkeypatch):
 
     assert result is False
     assert copied == ["Hello"]
+
+
+def test_output_turn_waits_for_earlier_sessions():
+    ordered_sessions = []
+    session_two_finished = threading.Event()
+
+    def run_session_two() -> None:
+        app.wait_for_output_turn(2)
+        ordered_sessions.append(2)
+        app.advance_output_turn()
+        session_two_finished.set()
+
+    worker = threading.Thread(target=run_session_two, daemon=True)
+    worker.start()
+
+    assert session_two_finished.wait(0.05) is False
+
+    app.wait_for_output_turn(1)
+    ordered_sessions.append(1)
+    app.advance_output_turn()
+
+    assert session_two_finished.wait(1.0) is True
+    worker.join(timeout=1.0)
+    assert ordered_sessions == [1, 2]
 
 
 def test_append_work_log_entry_writes_timestamped_single_line(monkeypatch, tmp_path: Path):

@@ -166,7 +166,7 @@ Notes and tips
 - Punctuation options affect both dictation and work log text content.
 - Paste suffix options affect dictation paste only.
 - Tray icon color: green when idle, red while listening, and orange + spinner while transcribing.
-- While transcribing, new recordings are ignored until the current transcript finishes.
+- While an earlier transcript is still processing, you can start a new recording; completed dictations are pasted in the order the recordings started.
 - Realtime live typing applies only to dictation mode and may need app focus to stay in the target field.
 - GPT-4o Realtime is hard-switched to server-side mode (no local chunking and no Whisper fallback inside realtime mode).
 - If realtime dependencies are missing, GPT-4o Realtime selection logs an install hint and stays on Whisper.

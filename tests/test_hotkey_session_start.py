@@ -70,6 +70,20 @@ class HotkeySessionStartTests(unittest.TestCase):
         with push_to_talk.state.lock:
             self.assertTrue(push_to_talk.state.session_start_pending)
 
+    def test_dictation_can_start_while_previous_audio_is_still_transcribing(self) -> None:
+        key = SimpleNamespace(name=push_to_talk.HOTKEY_DICTATION.lower())
+        with push_to_talk.state.lock:
+            push_to_talk.state.is_transcribing = True
+            push_to_talk.state.transcribing_session_count = 1
+
+        with patch.object(push_to_talk.threading, "Thread", ThreadRecorder):
+            push_to_talk.on_press(key)
+
+        self.assertEqual(1, len(ThreadRecorder.instances))
+        self.assertTrue(ThreadRecorder.instances[0].started)
+        with push_to_talk.state.lock:
+            self.assertTrue(push_to_talk.state.session_start_pending)
+
     def test_start_listening_clears_pending_flag_when_api_key_missing(self) -> None:
         push_to_talk.OPENAI_API_KEY = ""
         with push_to_talk.state.lock:
