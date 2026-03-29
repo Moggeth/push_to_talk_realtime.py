@@ -146,7 +146,6 @@ CI now runs:
 - Open the tray menu, click `Set Hotkey...`, press a key or combo, confirm the drafted label looks right, then click `Accept`.
 - Expected: the tray menu immediately shows the new dictation hotkey.
 - Expected: the hotkey only starts dictation when the drafted keys are the only keys being held, except for `Shift + hotkey` system-audio capture.
-- Expected: pressing bare `Fn` on many laptops drafts nothing because the OS never receives it as a normal key event.
 
 4) Realtime live typing (GPT-4o Realtime)
 - In tray menu, set "Transcription engine" -> "GPT-4o Realtime".
@@ -155,10 +154,9 @@ CI now runs:
 - Expected: realtime behavior is server-side; no local chunking fallback should appear in logs.
 - Expected: no `invalid_model` websocket errors when using the default realtime websocket URL.
 
-5) Touchpad dictation shortcut
-- In the tray menu, click `Use Three-Finger Touchpad Press`.
-- On Ubuntu/GNOME with touchpad click method set to `fingers`, press with three fingers and speak.
-- Expected: dictation starts on press and stops on release via the middle-click path.
+5) Shared input device menu
+- Open the tray menu, choose `Input device`, then select a different microphone/input.
+- Expected: both normal dictation and work-log capture switch to the same selected device.
 
 6) System audio dictation
 - Start playing a video or song.
@@ -172,17 +170,12 @@ CI now runs:
 - If the target app does not accept simulated paste, expected fallback: the app
   logs that the transcript stayed on the clipboard instead of crashing.
 
-8) Linux/macOS normal typing does not trigger Stereo Mix lookup
-- Run the app on Linux or macOS, focus another window, and type spaces normally.
-- Expected: no repeated `Stereo mix device matching 'Stereo Mix' not found.`
-  lines in the console.
-
-9) Multi-sentence spacing (your request)
+8) Multi-sentence spacing (your request)
 - Hold Caps Lock, speak 3-5 sentences with clear full stops, release.
 - Expected: the pasted text has normal spacing between sentences, and only a
   single trailing space at the very end (no extra spaces at line breaks).
 
-10) Punctuation toggles
+9) Punctuation toggles
 - Toggle "Ensure terminal punctuation", "Capitalize first letter", and
   "Normalize whitespace" from the tray menu.
 - Expected: dictation + work log reflect the settings on the next run.
@@ -247,3 +240,9 @@ CI now runs:
 23) Mouse-side-button remap
 - Map a spare mouse button to `F13`, relaunch the app, then hold that button and speak.
 - Expected: dictation starts/stops cleanly and other apps no longer react as if `F8` was pressed.
+
+24) Ubuntu tray interactivity
+- On Ubuntu GNOME/Wayland, launch the app from `python start_push_to_talk.py`.
+- Left-click or right-click the tray icon.
+- Expected: the tray menu opens and actions such as `Set Hotkey...`, `Restart`, and `Quit` are clickable.
+- Expected: there are no preset entries such as `Default (no frills)` or `Bells and whistles`; individual toggles remain under `Options`.

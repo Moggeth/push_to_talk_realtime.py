@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: I001
 """
 Push-to-talk transcription:
 - Hold the configured dictation trigger to dictate and paste upon release.
@@ -13,11 +14,9 @@ Notes
 """
 
 import base64
-import ctypes
 import json
 import os
 import platform
-import plistlib
 import queue
 import signal
 import subprocess
@@ -26,20 +25,36 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
 import pyperclip
-import pystray
 import sounddevice as sd
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw
 from pynput import keyboard as pynput_keyboard
-from pynput import mouse as pynput_mouse
 
-from platform_input import send_paste_shortcut, supports_foreground_console_detection
+import desktop_bootstrap  # noqa: F401
+from history_store import append_history_entry as append_history_entry_core
+from platform_input import send_paste_shortcut
+from startup_integration import (
+    StartupContext,
+)
+from startup_integration import (
+    disable_run_on_startup as disable_run_on_startup_core,
+)
+from startup_integration import enable_run_on_startup as enable_run_on_startup_core
+from startup_integration import ensure_startup_env_file as ensure_startup_env_file_core
+from startup_integration import is_run_on_startup_enabled as is_run_on_startup_enabled_core
+from startup_integration import linux_user_service_path as linux_user_service_path_core
+from startup_integration import macos_launch_agent_path as macos_launch_agent_path_core
+from startup_integration import render_linux_systemd_service as render_linux_systemd_service_core
+from startup_integration import render_macos_launch_agent as render_macos_launch_agent_core
+from startup_integration import render_windows_startup_script as render_windows_startup_script_core
+from startup_integration import startup_env_file_path as startup_env_file_path_core
+from startup_integration import startup_python_executable as startup_python_executable_core
+from startup_integration import windows_startup_script_path as windows_startup_script_path_core
 from text_processing import (
     SUFFIX_NEWLINE,
     SUFFIX_NONE,
@@ -48,9 +63,10 @@ from text_processing import (
 from text_processing import (
     apply_punctuation_options as apply_punctuation_options_core,
 )
-from text_processing import (
-    prepare_clipboard_text as prepare_clipboard_text_core,
-)
+from text_processing import prepare_clipboard_text as prepare_clipboard_text_core
+
+# Import after desktop_bootstrap configures the Linux tray backend.
+import pystray
 
 try:
     import winsound
@@ -127,12 +143,9 @@ DEVICE_INDEX = None  # set to an index from sd.query_devices() if needed
 MODE_DICTATION = "dictation"
 MODE_WORKLOG = "worklog"
 
-HOTKEY_KIND_MOUSE = "mouse"
 HOTKEY_KIND_KEYBOARD = "keyboard"
 DEFAULT_HOTKEY_DICTATION = "CAPS_LOCK"
 DEFAULT_HOTKEY_WORKLOG = "F14"
-DEFAULT_DICTATION_HOTKEY_LABEL = "Three-finger touchpad press"
-DICTATION_MOUSE_BUTTON = pynput_mouse.Button.middle
 PASTE_ON_RELEASE = True
 DEFAULT_SUFFIX_MODE = SUFFIX_SPACE
 DEFAULT_DICTATION_HISTORY_ENABLED = True
@@ -150,12 +163,6 @@ DEFAULT_DEVICE_LABEL = "System default input"
 STEREO_MIX_SEARCH = os.getenv("STEREO_MIX_SEARCH", "Stereo Mix")
 SYSTEM_AUDIO_DEVICE = os.getenv("SYSTEM_AUDIO_DEVICE", "").strip()
 IS_WINDOWS = platform.system().lower().startswith("win")
-try:
-    USER32 = ctypes.windll.user32 if IS_WINDOWS else None
-    KERNEL32 = ctypes.windll.kernel32 if IS_WINDOWS else None
-except Exception:  # pylint: disable=broad-except
-    USER32 = None
-    KERNEL32 = None
 
 MUTE_RMS_THRESHOLD = float(os.getenv("MUTE_RMS_THRESHOLD", "0.01"))
 MUTE_WARNING_AFTER_S = float(os.getenv("MUTE_WARNING_AFTER_S", "1.5"))
@@ -257,9 +264,6 @@ class SessionState:
     dictation_device_label: str = DEFAULT_DEVICE_LABEL
     worklog_device_index: int | None = DEVICE_INDEX
     worklog_device_label: str = DEFAULT_DEVICE_LABEL
-    worklog_default_device_index: int | None = DEVICE_INDEX
-    worklog_default_device_label: str = DEFAULT_DEVICE_LABEL
-    worklog_uses_stereo_mix: bool = False
     stereo_mix_device_index: int | None = None
     stereo_mix_device_label: str = ""
     session_counter: int = 0
@@ -291,7 +295,6 @@ class SessionState:
 state = SessionState()
 shutdown_event = threading.Event()
 keyboard_listener: pynput_keyboard.Listener | None = None
-mouse_listener: pynput_mouse.Listener | None = None
 tray_icon: TrayIconLike | None = None
 tray_animation_thread: threading.Thread | None = None
 DEVICE_LIST: list[tuple[int, str]] = []
@@ -396,13 +399,24 @@ def canonicalize_hotkey_tokens(tokens: list[str] | set[str] | tuple[str, ...]) -
 
 def format_hotkey_tokens(tokens: tuple[str, ...]) -> str:
     if not tokens:
-        return DEFAULT_DICTATION_HOTKEY_LABEL
+        return HOTKEY_DISPLAY_NAMES.get(DEFAULT_HOTKEY_DICTATION, DEFAULT_HOTKEY_DICTATION)
     return "+".join(HOTKEY_DISPLAY_NAMES.get(token, token.title()) for token in tokens)
 
 
 def dictation_hotkey_summary() -> str:
     with state.lock:
         return state.dictation_hotkey_label
+
+
+def startup_context() -> StartupContext:
+    return StartupContext(
+        script_dir=SCRIPT_DIR,
+        starter_script_path=STARTER_SCRIPT_PATH,
+        systemd_service_name=SYSTEMD_SERVICE_NAME,
+        macos_launch_agent_name=MACOS_LAUNCH_AGENT_NAME,
+        python_executable=sys.executable,
+        openai_api_key=OPENAI_API_KEY,
+    )
 
 
 def load_settings_from_disk() -> dict[str, Any]:
@@ -442,19 +456,13 @@ def apply_persisted_settings() -> None:
 
     settings = load_settings_from_disk()
     engine = normalize_transcription_engine(str(settings.get("transcription_engine", "")))
-    dictation_kind = HOTKEY_KIND_KEYBOARD
     dictation_tokens = (HOTKEY_DICTATION,)
     worklog_hotkey = HOTKEY_WORKLOG
     dictation_history_enabled = DEFAULT_DICTATION_HISTORY_ENABLED
 
     if "DICTATION_HOTKEY" not in os.environ and settings:
-        saved_kind = str(settings.get("dictation_hotkey_kind", "")).strip().lower()
         saved_tokens = canonicalize_hotkey_tokens(settings.get("dictation_hotkey_tokens", []))
-        if saved_kind == HOTKEY_KIND_MOUSE:
-            dictation_kind = HOTKEY_KIND_MOUSE
-            dictation_tokens = ()
-            HOTKEY_DICTATION = DEFAULT_DICTATION_HOTKEY_LABEL
-        elif saved_tokens:
+        if saved_tokens:
             dictation_tokens = saved_tokens
             HOTKEY_DICTATION = format_hotkey_tokens(dictation_tokens)
         else:
@@ -475,7 +483,7 @@ def apply_persisted_settings() -> None:
         )
     with state.lock:
         state.transcription_engine = engine
-        state.dictation_hotkey_kind = dictation_kind
+        state.dictation_hotkey_kind = HOTKEY_KIND_KEYBOARD
         state.dictation_hotkey_tokens = dictation_tokens
         state.dictation_hotkey_label = format_hotkey_tokens(dictation_tokens)
         state.dictation_history_enabled = dictation_history_enabled
@@ -497,17 +505,13 @@ apply_persisted_settings()
 def set_dictation_hotkey(kind: str, tokens: tuple[str, ...] = ()) -> None:
     global HOTKEY_DICTATION
     normalized_tokens = canonicalize_hotkey_tokens(tokens)
+    if kind != HOTKEY_KIND_KEYBOARD or not normalized_tokens:
+        normalized_tokens = (DEFAULT_HOTKEY_DICTATION,)
     with state.lock:
-        if kind == HOTKEY_KIND_KEYBOARD and normalized_tokens:
-            state.dictation_hotkey_kind = HOTKEY_KIND_KEYBOARD
-            state.dictation_hotkey_tokens = normalized_tokens
-            state.dictation_hotkey_label = format_hotkey_tokens(normalized_tokens)
-            HOTKEY_DICTATION = state.dictation_hotkey_label
-        else:
-            state.dictation_hotkey_kind = HOTKEY_KIND_MOUSE
-            state.dictation_hotkey_tokens = ()
-            state.dictation_hotkey_label = DEFAULT_DICTATION_HOTKEY_LABEL
-            HOTKEY_DICTATION = DEFAULT_DICTATION_HOTKEY_LABEL
+        state.dictation_hotkey_kind = HOTKEY_KIND_KEYBOARD
+        state.dictation_hotkey_tokens = normalized_tokens
+        state.dictation_hotkey_label = format_hotkey_tokens(normalized_tokens)
+        HOTKEY_DICTATION = state.dictation_hotkey_label
     save_settings_to_disk()
     refresh_tray_menu()
 
@@ -726,17 +730,7 @@ def advance_output_turn() -> None:
 
 
 def append_history_entry(text: str, source: str) -> None:
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sanitized = " ".join(text.strip().splitlines())
-    line = f"- {timestamp} [{source}] {sanitized}"
-    try:
-        WORK_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with WORK_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except Exception as exc:
-        log("[Work log error]", exc)
-    else:
-        log(f"[Logged] {line}")
+    append_history_entry_core(WORK_LOG_PATH, text, source, log=log)
 
 
 def append_work_log_entry(text: str) -> None:
@@ -764,27 +758,11 @@ def stop_keyboard_listener() -> None:
         keyboard_listener = None
 
 
-def start_mouse_listener() -> None:
-    global mouse_listener
-    if mouse_listener is None:
-        mouse_listener = pynput_mouse.Listener(on_click=on_mouse_click)
-        mouse_listener.start()
-
-
-def stop_mouse_listener() -> None:
-    global mouse_listener
-    if mouse_listener is not None:
-        mouse_listener.stop()
-        mouse_listener = None
-
-
 def start_input_listeners() -> None:
     start_keyboard_listener()
-    start_mouse_listener()
 
 
 def stop_input_listeners() -> None:
-    stop_mouse_listener()
     stop_keyboard_listener()
 
 
@@ -958,68 +936,43 @@ def initialize_device_state() -> None:
             fallback_index = None
             fallback_label = DEFAULT_DEVICE_LABEL
 
-    dictation_descriptor = os.getenv("DICTATION_DEVICE", "").strip()
-    worklog_descriptor = os.getenv("WORKLOG_DEVICE", "").strip()
+    shared_descriptor = (
+        os.getenv("DICTATION_DEVICE", "").strip() or os.getenv("WORKLOG_DEVICE", "").strip()
+    )
 
-    dictation_index = fallback_index
-    dictation_label = fallback_label
-    if dictation_descriptor:
-        idx, label, ok = resolve_device_descriptor(dictation_descriptor)
+    device_index = fallback_index
+    device_label = fallback_label
+    if shared_descriptor:
+        idx, label, ok = resolve_device_descriptor(shared_descriptor)
         if ok:
-            dictation_index, dictation_label = idx, label
+            device_index, device_label = idx, label
         else:
-            log(
-                f"[Audio] Dictation device '{dictation_descriptor}' not found; using {fallback_label}."
-            )
+            log(f"[Audio] Input device '{shared_descriptor}' not found; using {fallback_label}.")
 
-    worklog_index = dictation_index
-    worklog_label = dictation_label
-    if worklog_descriptor:
-        idx, label, ok = resolve_device_descriptor(worklog_descriptor)
-        if ok:
-            worklog_index, worklog_label = idx, label
-        else:
-            log(
-                f"[Audio] Worklog device '{worklog_descriptor}' not found; using {dictation_label}."
-            )
-
-    state.dictation_device_index = dictation_index
-    state.dictation_device_label = dictation_label
-    state.worklog_default_device_index = dictation_index
-    state.worklog_default_device_label = dictation_label
-    state.worklog_device_index = worklog_index
-    state.worklog_device_label = worklog_label
-    state.worklog_uses_stereo_mix = False
+    state.dictation_device_index = device_index
+    state.dictation_device_label = device_label
+    state.worklog_device_index = device_index
+    state.worklog_device_label = device_label
     state.stereo_mix_device_index = None
     state.stereo_mix_device_label = ""
 
-    log_device_selection("Dictation", dictation_index, dictation_label)
-    log_device_selection("Worklog", worklog_index, worklog_label)
+    log_device_selection("Input", device_index, device_label)
 
 
-def is_device_selected(role: str, idx: int | None) -> bool:
+def is_input_device_selected(idx: int | None) -> bool:
     with state.lock:
-        if role == MODE_DICTATION:
-            return state.dictation_device_index == idx
-        return state.worklog_device_index == idx
+        return state.dictation_device_index == idx and state.worklog_device_index == idx
 
 
-def set_device_for_role(role: str, idx: int | None, label: str) -> None:
+def set_input_device(idx: int | None, label: str) -> None:
     with state.lock:
-        if role == MODE_DICTATION:
-            state.dictation_device_index = idx
-            state.dictation_device_label = label
-            if state.is_listening and state.mode == MODE_DICTATION:
-                state.active_device_label = label
-        else:
-            state.worklog_default_device_index = idx
-            state.worklog_default_device_label = label
-            state.worklog_device_index = idx
-            state.worklog_device_label = label
-            state.worklog_uses_stereo_mix = False
-            if state.is_listening and state.mode == MODE_WORKLOG:
-                state.active_device_label = label
-    log_device_selection(role.capitalize(), idx, label)
+        state.dictation_device_index = idx
+        state.dictation_device_label = label
+        state.worklog_device_index = idx
+        state.worklog_device_label = label
+        if state.is_listening:
+            state.active_device_label = label
+    log_device_selection("Input", idx, label)
     refresh_tray_menu()
 
 
@@ -1910,62 +1863,6 @@ def start_listening(
 # -------------------- Hotkey handling --------------------
 
 
-def console_is_foreground() -> bool:
-    if not supports_foreground_console_detection() or USER32 is None or KERNEL32 is None:
-        return False
-    try:
-        foreground = USER32.GetForegroundWindow()
-        console = KERNEL32.GetConsoleWindow()
-    except Exception:  # pylint: disable=broad-except
-        return False
-    return foreground != 0 and console != 0 and foreground == console
-
-
-def toggle_worklog_stereo_mix() -> None:
-    with state.lock:
-        currently_stereo = state.worklog_uses_stereo_mix
-        default_index = state.worklog_default_device_index
-        default_label = state.worklog_default_device_label
-        is_active = state.is_listening and state.mode == MODE_WORKLOG
-
-    if currently_stereo:
-        index_text = default_index if default_index is not None else "default"
-        with state.lock:
-            state.worklog_device_index = default_index
-            state.worklog_device_label = default_label
-            state.worklog_uses_stereo_mix = False
-            if is_active:
-                state.active_device_label = default_label
-        log(f"[Worklog audio] Reverted to {default_label} (index={index_text}).")
-        refresh_tray_menu()
-        return
-
-    idx, label = lookup_input_device_by_name(STEREO_MIX_SEARCH)
-    if idx is None:
-        log(f"[Worklog audio] Stereo mix device matching '{STEREO_MIX_SEARCH}' not found.")
-        return
-
-    with state.lock:
-        state.worklog_device_index = idx
-        state.worklog_device_label = label
-        state.worklog_uses_stereo_mix = True
-        state.stereo_mix_device_index = idx
-        state.stereo_mix_device_label = label
-        if is_active:
-            state.active_device_label = label
-    log(f"[Worklog audio] Stereo mix enabled -> {label} (index={idx}).")
-    refresh_tray_menu()
-
-
-def handle_spacebar_press() -> None:
-    if not console_is_foreground():
-        return
-    with state.lock:
-        if state.is_listening:
-            return
-    toggle_worklog_stereo_mix()
-
-
 def get_key_name(key) -> str:
     if isinstance(key, pynput_keyboard.KeyCode):
         return canonicalize_hotkey_token(key.char or "")
@@ -2014,9 +1911,6 @@ def on_press(key):
     key_name = get_key_name(key)
     if not key_name:
         return
-
-    if key_name == "SPACE":
-        handle_spacebar_press()
 
     double_tap = False
     dictation_start = False
@@ -2157,55 +2051,14 @@ def on_release(key):
             state.shift_keys_down.discard(key_name)
 
 
-def on_mouse_click(_x, _y, button, pressed):
-    if button != DICTATION_MOUSE_BUTTON:
-        return
-
-    if pressed:
-        with state.lock:
-            if state.is_listening:
-                if state.toggle_mode_enabled and state.active_hotkey_kind == HOTKEY_KIND_MOUSE:
-                    state.should_stop = True
-                return
-            if state.session_start_pending or state.dictation_hotkey_kind != HOTKEY_KIND_MOUSE:
-                return
-            device_index = state.dictation_device_index
-            device_label = state.dictation_device_label
-        if dictation_uses_system_audio():
-            device_index, device_label, ok = resolve_system_audio_input_device()
-            if not ok:
-                log(
-                    "[Audio] System audio capture unavailable."
-                    f" No input device matched '{system_audio_search_hint()}'."
-                )
-                return
-        begin_session_start(
-            MODE_DICTATION,
-            HOTKEY_DICTATION,
-            HOTKEY_KIND_MOUSE,
-            (),
-            device_index,
-            device_label,
-        )
-        return
-
-    with state.lock:
-        if (
-            not state.toggle_mode_enabled
-            and state.is_listening
-            and state.active_hotkey_kind == HOTKEY_KIND_MOUSE
-        ):
-            state.should_stop = True
-
-
 # -------------------- Main --------------------
 
 
 def ensure_work_log_exists() -> None:
     try:
-        WORK_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if not WORK_LOG_PATH.exists():
-            WORK_LOG_PATH.touch()
+        from history_store import ensure_history_file
+
+        ensure_history_file(WORK_LOG_PATH)
     except Exception as exc:  # pylint: disable=broad-except
         log("[Tray] Unable to create work log file:", exc)
 
@@ -2376,30 +2229,6 @@ def toggle_monitor(_icon=None, _item=None) -> None:
     refresh_tray_menu()
 
 
-def apply_default_preset(_icon=None, _item=None) -> None:
-    with state.lock:
-        state.beeps_enabled = False
-        state.tooltip_enabled = False
-        state.toggle_mode_enabled = False
-        state.monitor_enabled = False
-        state.paste_suffix_mode = DEFAULT_SUFFIX_MODE
-        state.punctuation_terminal = True
-        state.punctuation_capitalize = False
-        state.punctuation_normalize_spaces = False
-        state.dictation_history_enabled = DEFAULT_DICTATION_HISTORY_ENABLED
-        state.transcription_engine = TRANSCRIPTION_ENGINE_WHISPER
-    save_settings_to_disk()
-    refresh_tray_menu()
-
-
-def apply_bells_preset(_icon=None, _item=None) -> None:
-    with state.lock:
-        state.beeps_enabled = True
-        state.tooltip_enabled = True
-        state.monitor_enabled = True
-    refresh_tray_menu()
-
-
 def is_systemd_managed() -> bool:
     value = os.getenv(SYSTEMD_MANAGED_ENV, "")
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
@@ -2420,48 +2249,23 @@ def run_systemd_action(action: str) -> bool:
 
 
 def windows_startup_script_path() -> Path:
-    appdata = os.getenv("APPDATA")
-    if appdata:
-        return (
-            Path(appdata)
-            / "Microsoft"
-            / "Windows"
-            / "Start Menu"
-            / "Programs"
-            / "Startup"
-            / "push-to-talk-realtime.cmd"
-        )
-    return (
-        Path.home()
-        / "AppData"
-        / "Roaming"
-        / "Microsoft"
-        / "Windows"
-        / "Start Menu"
-        / "Programs"
-        / "Startup"
-        / "push-to-talk-realtime.cmd"
-    )
+    return windows_startup_script_path_core()
 
 
 def macos_launch_agent_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"{MACOS_LAUNCH_AGENT_NAME}.plist"
+    return macos_launch_agent_path_core(MACOS_LAUNCH_AGENT_NAME)
 
 
 def linux_user_service_path() -> Path:
-    return Path.home() / ".config" / "systemd" / "user" / SYSTEMD_SERVICE_NAME
+    return linux_user_service_path_core(SYSTEMD_SERVICE_NAME)
 
 
 def startup_env_file_path() -> Path:
-    return Path.home() / ".config" / "push-to-talk-realtime.env"
+    return startup_env_file_path_core()
 
 
 def startup_python_executable() -> str:
-    if platform.system() == "Windows":
-        pythonw = Path(sys.executable).with_name("pythonw.exe")
-        if pythonw.exists():
-            return str(pythonw)
-    return sys.executable
+    return startup_python_executable_core(sys.executable)
 
 
 def startup_entry_script_path() -> Path:
@@ -2469,144 +2273,46 @@ def startup_entry_script_path() -> Path:
 
 
 def render_linux_systemd_service() -> str:
-    entry_script = startup_entry_script_path()
-    env_path = startup_env_file_path()
-    return "\n".join(
-        [
-            "[Unit]",
-            "Description=Push-to-talk Whisper tray app",
-            "After=graphical-session.target",
-            "PartOf=graphical-session.target",
-            "",
-            "[Service]",
-            "Type=simple",
-            f"WorkingDirectory={SCRIPT_DIR}",
-            f"EnvironmentFile=-{env_path}",
-            "Environment=PUSH_TO_TALK_MANAGED_BY_SYSTEMD=1",
-            f"ExecStart={startup_python_executable()} {entry_script}",
-            "Restart=always",
-            "RestartSec=2",
-            "",
-            "[Install]",
-            "WantedBy=default.target",
-            "",
-        ]
-    )
+    return render_linux_systemd_service_core(startup_context())
 
 
 def render_windows_startup_script() -> str:
-    return "\r\n".join(
-        [
-            "@echo off",
-            f'start "" "{startup_python_executable()}" "{startup_entry_script_path()}"',
-            "",
-        ]
-    )
+    return render_windows_startup_script_core(startup_context())
 
 
 def render_macos_launch_agent() -> bytes:
-    payload = {
-        "Label": MACOS_LAUNCH_AGENT_NAME,
-        "ProgramArguments": [startup_python_executable(), str(startup_entry_script_path())],
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "WorkingDirectory": str(SCRIPT_DIR),
-        "EnvironmentVariables": {"PUSH_TO_TALK_MANAGED_BY_SYSTEMD": "1"},
-    }
-    return plistlib.dumps(payload)
+    return render_macos_launch_agent_core(startup_context())
 
 
 def ensure_startup_env_file() -> None:
-    env_path = startup_env_file_path()
-    if env_path.exists():
-        return
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["# Add OPENAI_API_KEY here if it is not already in your login environment."]
-    if OPENAI_API_KEY:
-        lines.append(f"OPENAI_API_KEY={OPENAI_API_KEY}")
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ensure_startup_env_file_core(startup_context())
 
 
 def is_run_on_startup_enabled() -> bool:
-    system = platform.system()
-    if system == "Linux":
-        try:
-            result = subprocess.run(
-                ["systemctl", "--user", "is-enabled", SYSTEMD_SERVICE_NAME],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except Exception:
-            return False
-        return result.returncode == 0
-    if system == "Windows":
-        return windows_startup_script_path().exists()
-    if system == "Darwin":
-        return macos_launch_agent_path().exists()
-    return False
+    return is_run_on_startup_enabled_core(startup_context())
 
 
 def enable_run_on_startup() -> bool:
-    system = platform.system()
     try:
-        if system == "Linux":
-            ensure_startup_env_file()
-            service_path = linux_user_service_path()
-            service_path.parent.mkdir(parents=True, exist_ok=True)
-            service_path.write_text(render_linux_systemd_service(), encoding="utf-8")
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-            subprocess.run(
-                ["systemctl", "--user", "enable", "--now", SYSTEMD_SERVICE_NAME], check=True
-            )
-            return True
-        if system == "Windows":
-            startup_path = windows_startup_script_path()
-            startup_path.parent.mkdir(parents=True, exist_ok=True)
-            startup_path.write_text(render_windows_startup_script(), encoding="utf-8")
-            return True
-        if system == "Darwin":
-            plist_path = macos_launch_agent_path()
-            plist_path.parent.mkdir(parents=True, exist_ok=True)
-            plist_path.write_bytes(render_macos_launch_agent())
-            subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
-            subprocess.run(["launchctl", "load", "-w", str(plist_path)], check=True)
-            return True
+        return enable_run_on_startup_core(startup_context())
     except Exception as exc:  # pylint: disable=broad-except
         log("[Startup] Unable to enable run on startup:", exc)
         return False
-    log("[Startup] Run on startup is not supported on this platform.")
-    return False
 
 
 def disable_run_on_startup() -> bool:
-    system = platform.system()
     try:
-        if system == "Linux":
-            subprocess.run(
-                ["systemctl", "--user", "disable", "--now", SYSTEMD_SERVICE_NAME],
-                check=False,
-            )
-            return True
-        if system == "Windows":
-            windows_startup_script_path().unlink(missing_ok=True)
-            return True
-        if system == "Darwin":
-            plist_path = macos_launch_agent_path()
-            subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
-            plist_path.unlink(missing_ok=True)
-            return True
+        return disable_run_on_startup_core(startup_context())
     except Exception as exc:  # pylint: disable=broad-except
         log("[Startup] Unable to disable run on startup:", exc)
         return False
-    log("[Startup] Run on startup is not supported on this platform.")
-    return False
 
 
 def toggle_run_on_startup(_icon=None, _item=None) -> None:
     enabled = is_run_on_startup_enabled()
     changed = disable_run_on_startup() if enabled else enable_run_on_startup()
     if not changed:
+        log("[Startup] Run on startup is not supported on this platform.")
         return
     log(
         "[Startup]",
@@ -2671,11 +2377,6 @@ def prompt_for_hotkey(_icon=None, _item=None) -> None:
     log(f"[Tray] Dictation hotkey set to {dictation_hotkey_summary()}.")
 
 
-def use_touchpad_hotkey(_icon=None, _item=None) -> None:
-    set_dictation_hotkey(HOTKEY_KIND_MOUSE)
-    log(f"[Tray] Dictation hotkey set to {DEFAULT_DICTATION_HOTKEY_LABEL}.")
-
-
 def quit_app(icon: TrayIconLike | None = None, _item=None) -> None:
     if is_systemd_managed():
         run_systemd_action("stop")
@@ -2703,39 +2404,30 @@ def refresh_audio_devices(_icon=None, _item=None) -> None:
     rebuild_tray_menu()
 
 
-def make_device_action(role: str, idx: int | None, label: str):
+def make_device_action(idx: int | None, label: str):
     def action(_icon, _item):
-        set_device_for_role(role, idx, label)
+        set_input_device(idx, label)
 
     return action
 
 
-def build_device_menu(role: str) -> pystray.Menu:
+def build_input_device_menu() -> pystray.Menu:
     items = [
         pystray.MenuItem(
             DEFAULT_DEVICE_LABEL,
-            make_device_action(role, None, DEFAULT_DEVICE_LABEL),
+            make_device_action(None, DEFAULT_DEVICE_LABEL),
             radio=True,
-            checked=lambda _item: is_device_selected(role, None),
+            checked=lambda _item: is_input_device_selected(None),
         )
     ]
     for idx, label in DEVICE_LIST:
         items.append(
             pystray.MenuItem(
                 label,
-                make_device_action(role, idx, label),
+                make_device_action(idx, label),
                 radio=True,
-                checked=lambda _item, idx=idx: is_device_selected(role, idx),
+                checked=lambda _item, idx=idx: is_input_device_selected(idx),
             )
-        )
-    if role == MODE_WORKLOG:
-        items.insert(
-            0,
-            pystray.MenuItem(
-                "Toggle Stereo Mix (work log)",
-                toggle_worklog_stereo_mix,
-                checked=lambda _item: state.worklog_uses_stereo_mix,
-            ),
         )
     return pystray.Menu(*items)
 
@@ -2835,18 +2527,10 @@ def build_menu() -> pystray.Menu:
         pystray.MenuItem(f"Dictation hotkey: {dictation_hotkey_summary()}", None, enabled=False),
         pystray.MenuItem(f"Work log hotkey: {HOTKEY_WORKLOG}", None, enabled=False),
         pystray.MenuItem("Set Hotkey...", prompt_for_hotkey),
-        pystray.MenuItem(
-            "Use Three-Finger Touchpad Press",
-            use_touchpad_hotkey,
-            checked=lambda _item: state.dictation_hotkey_kind == HOTKEY_KIND_MOUSE,
-        ),
-        pystray.MenuItem("Default (no frills)", apply_default_preset),
-        pystray.MenuItem("Bells and whistles", apply_bells_preset),
         pystray.MenuItem("Options", build_options_menu()),
         pystray.MenuItem("Transcription engine", build_transcription_menu()),
         pystray.MenuItem("Punctuation", build_punctuation_menu()),
-        pystray.MenuItem("Dictation input device", build_device_menu(MODE_DICTATION)),
-        pystray.MenuItem("Work log input device", build_device_menu(MODE_WORKLOG)),
+        pystray.MenuItem("Input device", build_input_device_menu()),
         pystray.MenuItem("Refresh audio devices", refresh_audio_devices),
         pystray.MenuItem("Open transcript history", open_work_log),
         pystray.MenuItem("Restart", restart_app),

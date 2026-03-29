@@ -132,9 +132,7 @@ class TkHotkeyDialog:
             container,
             text=(
                 "Keep this window focused, press your desired hotkey, then review the drafted "
-                "selection below and click Accept.\n"
-                "Note: bare Fn usually cannot be captured because firmware often handles it "
-                "before the OS sees a key event."
+                "selection below and click Accept."
             ),
             anchor="w",
             justify="left",
@@ -237,9 +235,7 @@ class GtkHotkeyDialog:
         instructions = Gtk.Label(
             label=(
                 "Keep this window focused, press your desired hotkey, then review the drafted "
-                "selection below and click Accept.\n"
-                "Note: bare Fn usually cannot be captured because firmware often handles it "
-                "before the OS sees a key event."
+                "selection below and click Accept."
             )
         )
         instructions.set_xalign(0)

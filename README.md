@@ -14,7 +14,7 @@ Features
 --------
 - Push-to-talk dictation: record and paste on release.
 - Transcript history: dictations are saved to `work_log.txt` with date/time stamps by default, so each person can review what they said later.
-- Configurable dictation hotkey: set a single key or key combo from the tray menu, or switch back to the Linux touchpad three-finger press shortcut.
+- Configurable dictation hotkey: set a single key or key combo from the tray menu.
 - Shift-modified dictation: hold `Shift` while pressing the dictation hotkey to capture system audio instead of the microphone.
 - Work log capture: record and append a timestamped entry to `work_log.txt`.
 - Transcription engine toggle: choose Whisper or GPT-4o Realtime from the tray menu.
@@ -23,10 +23,9 @@ Features
 - Tray controls: `Set Hotkey...`, transcript-history toggle, `Run on startup`, `Restart`, and `Quit`.
 - Busy tray feedback: tray icon shows a spinner while transcription is in progress.
 - Tray menu controls:
-  - Select dictation/worklog input devices (including Stereo Mix).
+  - Select one shared input device for both dictation and work-log capture.
   - Toggle beeps, status tooltip, tap-to-toggle mode, and mute monitor.
   - Punctuation options and paste suffix selection.
-  - Presets: "Default (no frills)" and "Bells and whistles".
 
 Hotkeys
 -------
@@ -36,18 +35,13 @@ Hotkeys
 - Work log: hold `F14` (more than ~0.25s) to record, or double-tap `F14` to open `work_log.txt`.
 - `Set Hotkey...` captures the exact drafted key or key combo and asks you to accept it before saving.
 - The dictation keyboard hotkey only fires when the drafted keys are the only keys being held, except for the special `Shift + hotkey` system-audio path.
-- Bare `Fn` usually cannot be captured on laptops because firmware handles it before the OS sees a normal key event.
 - Recommended Windows setup: map your mouse side button to `F13` in your mouse software. It is usually much less collision-prone than `F8`.
 - Override hotkeys with `DICTATION_HOTKEY` / `WORKLOG_HOTKEY`, or set `dictation_hotkey`, `dictation_hotkey_kind`, `dictation_hotkey_tokens`, and `worklog_hotkey` in `settings.json`.
-- (Windows console only) Spacebar: toggle Stereo Mix for the work log input.
 
 Tray Menu
 ---------
 - Dictation hotkey / Work log hotkey: show the currently active shortcuts.
 - Set Hotkey...: opens a small capture window, shows the drafted key combo, then saves it only after you click `Accept`.
-- Use Three-Finger Touchpad Press: switches dictation back to the Linux touchpad middle-click path.
-- Default (no frills): reset QoL options to the original behavior.
-- Bells and whistles: enable beeps, status tooltip, and mute monitor.
 - Options:
   - Save transcript history: on by default; when enabled, each final dictation is appended to `work_log.txt`.
   - Run on startup: installs or removes the platform startup hook for the current checkout.
@@ -63,8 +57,7 @@ Tray Menu
   - Ensure terminal punctuation (adds "." if missing; enabled by default).
   - Capitalize first letter.
   - Normalize whitespace.
-- Dictation input device: choose an input device (per-mode).
-- Work log input device: choose an input device (per-mode) + toggle Stereo Mix.
+- Input device: choose the shared input device used for both dictation and work-log capture.
 - Refresh audio devices.
 - Open transcript history.
 - Restart: restart the app, or restart the user service if the app is running under systemd.
@@ -82,7 +75,7 @@ Ubuntu install commands (including system packages needed by audio/tray/clipboar
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv python3-pip python3-tk portaudio19-dev libportaudio2 libasound2-dev gir1.2-ayatanaappindicator3-0.1 python3-xlib xclip
+sudo apt install -y python3-venv python3-pip python3-tk python3-gi portaudio19-dev libportaudio2 libasound2-dev gir1.2-ayatanaappindicator3-0.1 python3-xlib xclip
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -169,8 +162,8 @@ Environment variables:
 - `DICTATION_HOTKEY` (optional): single-key trigger for dictation, default `CAPS_LOCK`.
 - `WORKLOG_HOTKEY` (optional): single-key trigger for work log capture, default `F14`.
 - `PUSH_TO_TALK_SERVICE_NAME` (optional): service name used by the tray `Restart` / `Quit` actions, default `push-to-talk-realtime.service`.
-- `DICTATION_DEVICE` (optional): device index or name fragment for dictation.
-- `WORKLOG_DEVICE` (optional): device index or name fragment for work log.
+- `DICTATION_DEVICE` (optional): device index or name fragment for the shared microphone input.
+- `WORKLOG_DEVICE` (optional): legacy alias for the shared microphone input when `DICTATION_DEVICE` is unset.
 - `SYSTEM_AUDIO_DEVICE` (optional): device index or name fragment used by `Shift + DICTATION_HOTKEY`; if unset, the app searches for `STEREO_MIX_SEARCH`.
 - `WORK_LOG_PATH` (optional): custom path for `work_log.txt`.
 - `PUSH_TO_TALK_HELPER_PYTHON` (optional): override the interpreter used for the hotkey capture helper on Linux.
@@ -181,10 +174,12 @@ Environment variables:
 Device selection
 ----------------
 Use the tray menu to switch input devices on the fly. For scripted setup, set
-`DICTATION_DEVICE` or `WORKLOG_DEVICE` to a device index or a partial name
-match (case-insensitive). `Shift + DICTATION_HOTKEY` uses `SYSTEM_AUDIO_DEVICE`
-when configured, otherwise it searches for the `STEREO_MIX_SEARCH` input. The
-menu also includes a "Refresh audio devices" option. If a selected device
+`DICTATION_DEVICE` to a device index or a partial name match
+(case-insensitive). `WORKLOG_DEVICE` is kept as a compatibility alias if
+`DICTATION_DEVICE` is unset. `Shift + DICTATION_HOTKEY` uses
+`SYSTEM_AUDIO_DEVICE` when configured, otherwise it searches for the
+`STEREO_MIX_SEARCH` input. The menu also includes a "Refresh audio devices"
+option. If a selected device
 disappears (for example, USB unplug/replug), the app retries and falls back to
 another available input instead of crashing. Reselect the desired device after
 it reconnects.
@@ -197,10 +192,10 @@ Notes and tips
 - System audio capture depends on a loopback-capable input device. On many Windows systems that is exposed as `Stereo Mix`; if yours uses a different name, set `SYSTEM_AUDIO_DEVICE`.
 - On Linux, paste injection does not require the root-only `keyboard` package.
   If simulated paste fails, the transcript still remains on the clipboard.
+- On Ubuntu GNOME/Wayland, tray clicks and menus rely on the AppIndicator path.
+  Keep `python3-gi` and `gir1.2-ayatanaappindicator3-0.1` installed; otherwise
+  the fallback Xorg tray backend can show an icon but not a working menu.
 - The `Set Hotkey...` dialog uses `tkinter` where available and falls back to GTK on Linux when launched through the system `python3` interpreter.
-- The global spacebar shortcut for toggling Stereo Mix is disabled on Linux and
-  macOS to avoid intercepting normal typing in other apps. Use the tray menu
-  instead.
 - If a target app blocks simulated paste, trigger paste manually from the
   clipboard or try running the console with elevated permissions on Windows.
 - `work_log.txt` is a plain text history file. Dictations are tagged as `[Dictation]` and manual work-log captures are tagged as `[Work log]`.

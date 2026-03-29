@@ -9,6 +9,7 @@ from typing import ClassVar
 
 import pytest
 
+import history_store
 import push_to_talk_realtime as app
 
 
@@ -47,7 +48,6 @@ def reset_app_state(monkeypatch, tmp_path: Path):
     app.state = app.SessionState()
     app.tray_icon = None
     app.keyboard_listener = None
-    app.mouse_listener = None
     app.DEVICE_LIST = []
     app.shutdown_event.clear()
     monkeypatch.setattr(app, "WORK_LOG_PATH", tmp_path / "work_log.txt")
@@ -80,10 +80,8 @@ def test_initialize_device_state_uses_env_selected_devices(monkeypatch):
 
     assert app.state.dictation_device_index == 2
     assert app.state.dictation_device_label == "USB Mic"
-    assert app.state.worklog_device_index == 7
-    assert app.state.worklog_device_label == "Stereo Mix"
-    assert app.state.worklog_default_device_index == 2
-    assert app.state.worklog_default_device_label == "USB Mic"
+    assert app.state.worklog_device_index == 2
+    assert app.state.worklog_device_label == "USB Mic"
 
 
 def test_apply_punctuation_options_uses_state_flags(monkeypatch):
@@ -159,7 +157,6 @@ def test_initialize_device_state_falls_back_to_dictation_when_worklog_missing(mo
     assert app.state.dictation_device_index == 4
     assert app.state.worklog_device_index == 4
     assert app.state.worklog_device_label == "USB Mic"
-    assert app.state.worklog_uses_stereo_mix is False
 
 
 def test_pick_fallback_input_device_prefers_system_default(monkeypatch):
@@ -345,7 +342,7 @@ def test_append_work_log_entry_writes_timestamped_single_line(monkeypatch, tmp_p
             return datetime(2026, 1, 2, 3, 4, 5)
 
     work_log_path = tmp_path / "logs" / "work_log.txt"
-    monkeypatch.setattr(app, "datetime", FixedDateTime)
+    monkeypatch.setattr(history_store, "datetime", FixedDateTime)
     monkeypatch.setattr(app, "WORK_LOG_PATH", work_log_path)
 
     app.append_work_log_entry("First line\nSecond line")
@@ -362,7 +359,7 @@ def test_append_dictation_history_entry_writes_timestamped_single_line(monkeypat
             return datetime(2026, 1, 2, 3, 4, 5)
 
     work_log_path = tmp_path / "logs" / "work_log.txt"
-    monkeypatch.setattr(app, "datetime", FixedDateTime)
+    monkeypatch.setattr(history_store, "datetime", FixedDateTime)
     monkeypatch.setattr(app, "WORK_LOG_PATH", work_log_path)
 
     app.append_dictation_history_entry("First line\nSecond line")
@@ -457,47 +454,15 @@ def test_start_and_stop_keyboard_listener_manage_single_listener(monkeypatch):
     assert app.keyboard_listener is None
 
 
-def test_start_and_stop_mouse_listener_manage_single_listener(monkeypatch):
-    events = []
-
-    class FakeListener:
-        def __init__(self, on_click):
-            self.on_click = on_click
-            self.started = 0
-            self.stopped = 0
-
-        def start(self):
-            self.started += 1
-            events.append("start")
-
-        def stop(self):
-            self.stopped += 1
-            events.append("stop")
-
-    monkeypatch.setattr(app.pynput_mouse, "Listener", FakeListener)
-
-    app.start_mouse_listener()
-    listener = app.mouse_listener
-    app.start_mouse_listener()
-    app.stop_mouse_listener()
-
-    assert isinstance(listener, FakeListener)
-    assert listener.on_click is app.on_mouse_click
-    assert events == ["start", "stop"]
-    assert app.mouse_listener is None
-
-
-def test_start_and_stop_input_listeners_run_both(monkeypatch):
+def test_start_and_stop_input_listeners_run_keyboard_only(monkeypatch):
     calls = []
     monkeypatch.setattr(app, "start_keyboard_listener", lambda: calls.append("keyboard-start"))
-    monkeypatch.setattr(app, "start_mouse_listener", lambda: calls.append("mouse-start"))
     monkeypatch.setattr(app, "stop_keyboard_listener", lambda: calls.append("keyboard-stop"))
-    monkeypatch.setattr(app, "stop_mouse_listener", lambda: calls.append("mouse-stop"))
 
     app.start_input_listeners()
     app.stop_input_listeners()
 
-    assert calls == ["keyboard-start", "mouse-start", "mouse-stop", "keyboard-stop"]
+    assert calls == ["keyboard-start", "keyboard-stop"]
 
 
 def test_describe_device_includes_hostapi_name(monkeypatch):
@@ -612,53 +577,21 @@ def test_resolve_device_descriptor_supports_numeric_and_name(monkeypatch):
     assert app.resolve_device_descriptor("missing") == (None, app.DEFAULT_DEVICE_LABEL, False)
 
 
-def test_set_device_for_role_updates_state_and_refreshes_menu(monkeypatch):
+def test_set_input_device_updates_both_modes_and_refreshes_menu(monkeypatch):
     refresh_calls = []
     monkeypatch.setattr(app, "refresh_tray_menu", lambda: refresh_calls.append("refresh"))
     with app.state.lock:
         app.state.is_listening = True
         app.state.mode = app.MODE_WORKLOG
 
-    app.set_device_for_role(app.MODE_WORKLOG, 9, "Loopback")
+    app.set_input_device(9, "Loopback")
 
-    assert app.state.worklog_default_device_index == 9
+    assert app.state.dictation_device_index == 9
+    assert app.state.dictation_device_label == "Loopback"
     assert app.state.worklog_device_index == 9
     assert app.state.worklog_device_label == "Loopback"
     assert app.state.active_device_label == "Loopback"
     assert refresh_calls == ["refresh"]
-
-
-def test_toggle_worklog_stereo_mix_switches_between_default_and_stereo(monkeypatch):
-    refresh_calls = []
-    monkeypatch.setattr(app, "refresh_tray_menu", lambda: refresh_calls.append("refresh"))
-    monkeypatch.setattr(app, "lookup_input_device_by_name", lambda _term: (3, "Stereo Mix"))
-    app.state.worklog_default_device_index = None
-    app.state.worklog_default_device_label = app.DEFAULT_DEVICE_LABEL
-
-    app.toggle_worklog_stereo_mix()
-
-    assert app.state.worklog_uses_stereo_mix is True
-    assert app.state.worklog_device_index == 3
-    assert app.state.worklog_device_label == "Stereo Mix"
-
-    app.toggle_worklog_stereo_mix()
-
-    assert app.state.worklog_uses_stereo_mix is False
-    assert app.state.worklog_device_index is None
-    assert app.state.worklog_device_label == app.DEFAULT_DEVICE_LABEL
-    assert refresh_calls == ["refresh", "refresh"]
-
-
-def test_toggle_worklog_stereo_mix_logs_when_stereo_device_missing(monkeypatch):
-    logs = []
-    monkeypatch.setattr(app, "lookup_input_device_by_name", lambda _term: (None, ""))
-    monkeypatch.setattr(app, "log", lambda *args: logs.append(" ".join(map(str, args))))
-
-    app.toggle_worklog_stereo_mix()
-
-    assert logs == [
-        f"[Worklog audio] Stereo mix device matching '{app.STEREO_MIX_SEARCH}' not found."
-    ]
 
 
 def test_update_tray_tooltip_includes_status_mode_device_and_muted_warning():
@@ -820,37 +753,6 @@ def test_toggle_monitor_updates_timer_and_clears_warning(monkeypatch):
     assert refresh_calls == ["refresh", "refresh"]
 
 
-def test_handle_spacebar_press_toggles_stereo_mix_only_when_idle_and_foreground(monkeypatch):
-    calls = []
-    monkeypatch.setattr(app, "console_is_foreground", lambda: True)
-    monkeypatch.setattr(app, "toggle_worklog_stereo_mix", lambda: calls.append("toggle"))
-
-    app.handle_spacebar_press()
-
-    assert calls == ["toggle"]
-
-    with app.state.lock:
-        app.state.is_listening = True
-
-    app.handle_spacebar_press()
-
-    assert calls == ["toggle"]
-
-
-def test_console_is_foreground_returns_false_when_unsupported_or_windows_api_fails(monkeypatch):
-    monkeypatch.setattr(app, "supports_foreground_console_detection", lambda: False)
-    assert app.console_is_foreground() is False
-
-    monkeypatch.setattr(app, "supports_foreground_console_detection", lambda: True)
-    monkeypatch.setattr(
-        app,
-        "USER32",
-        SimpleNamespace(GetForegroundWindow=lambda: (_ for _ in ()).throw(RuntimeError("boom"))),
-    )
-    monkeypatch.setattr(app, "KERNEL32", SimpleNamespace(GetConsoleWindow=lambda: 10))
-    assert app.console_is_foreground() is False
-
-
 def test_on_press_dictation_starts_worker_thread(monkeypatch):
     monkeypatch.setattr(app.threading, "Thread", FakeThread)
     app.state.dictation_device_index = 4
@@ -946,15 +848,6 @@ def test_on_press_worklog_double_tap_opens_log_without_starting_recording(monkey
     assert app.state.worklog_double_tap_active is True
 
 
-def test_on_press_spacebar_routes_to_space_handler(monkeypatch):
-    calls = []
-    monkeypatch.setattr(app, "handle_spacebar_press", lambda: calls.append("space"))
-
-    app.on_press(make_key("SPACE"))
-
-    assert calls == ["space"]
-
-
 def test_on_press_in_toggle_mode_stops_active_session(monkeypatch):
     with app.state.lock:
         app.state.is_listening = True
@@ -1017,39 +910,6 @@ def test_on_release_shift_clears_modifier_state():
     assert app.state.pressed_keys == set()
 
 
-def test_on_mouse_click_starts_mouse_dictation(monkeypatch):
-    monkeypatch.setattr(app.threading, "Thread", FakeThread)
-    app.state.dictation_hotkey_kind = app.HOTKEY_KIND_MOUSE
-    app.state.dictation_hotkey_tokens = ()
-    app.state.dictation_hotkey_label = app.DEFAULT_DICTATION_HOTKEY_LABEL
-    app.state.dictation_device_index = 12
-    app.state.dictation_device_label = "Trackpad Mic"
-
-    app.on_mouse_click(0, 0, app.DICTATION_MOUSE_BUTTON, True)
-
-    assert len(FakeThread.created) == 1
-    created = FakeThread.created[0]
-    assert created.target is app.start_listening
-    assert created.args == (
-        app.MODE_DICTATION,
-        app.HOTKEY_DICTATION,
-        app.HOTKEY_KIND_MOUSE,
-        (),
-        12,
-        "Trackpad Mic",
-    )
-
-
-def test_on_mouse_click_release_stops_mouse_session():
-    with app.state.lock:
-        app.state.is_listening = True
-        app.state.active_hotkey_kind = app.HOTKEY_KIND_MOUSE
-
-    app.on_mouse_click(0, 0, app.DICTATION_MOUSE_BUTTON, False)
-
-    assert app.state.should_stop is True
-
-
 def test_on_release_clears_double_tap_flag_without_recording_timestamp(monkeypatch):
     with app.state.lock:
         app.state.worklog_double_tap_active = True
@@ -1060,46 +920,6 @@ def test_on_release_clears_double_tap_flag_without_recording_timestamp(monkeypat
 
     assert app.state.worklog_double_tap_active is False
     assert app.state.worklog_press_time == 0.0
-
-
-def test_apply_default_preset_resets_runtime_toggles(monkeypatch):
-    refresh_calls = []
-    monkeypatch.setattr(app, "refresh_tray_menu", lambda: refresh_calls.append("refresh"))
-    with app.state.lock:
-        app.state.beeps_enabled = True
-        app.state.tooltip_enabled = True
-        app.state.toggle_mode_enabled = True
-        app.state.monitor_enabled = True
-        app.state.paste_suffix_mode = app.SUFFIX_NEWLINE
-        app.state.punctuation_terminal = True
-        app.state.punctuation_capitalize = True
-        app.state.punctuation_normalize_spaces = True
-        app.state.dictation_history_enabled = False
-
-    app.apply_default_preset()
-
-    assert app.state.beeps_enabled is False
-    assert app.state.tooltip_enabled is False
-    assert app.state.toggle_mode_enabled is False
-    assert app.state.monitor_enabled is False
-    assert app.state.paste_suffix_mode == app.DEFAULT_SUFFIX_MODE
-    assert app.state.punctuation_terminal is True
-    assert app.state.punctuation_capitalize is False
-    assert app.state.punctuation_normalize_spaces is False
-    assert app.state.dictation_history_enabled is True
-    assert refresh_calls == ["refresh"]
-
-
-def test_apply_bells_preset_enables_visual_and_audio_toggles(monkeypatch):
-    refresh_calls = []
-    monkeypatch.setattr(app, "refresh_tray_menu", lambda: refresh_calls.append("refresh"))
-
-    app.apply_bells_preset()
-
-    assert app.state.beeps_enabled is True
-    assert app.state.tooltip_enabled is True
-    assert app.state.monitor_enabled is True
-    assert refresh_calls == ["refresh"]
 
 
 def test_refresh_audio_devices_refreshes_list_and_menu(monkeypatch):
@@ -1114,14 +934,12 @@ def test_refresh_audio_devices_refreshes_list_and_menu(monkeypatch):
 
 def test_make_device_action_selects_device(monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        app, "set_device_for_role", lambda role, idx, label: calls.append((role, idx, label))
-    )
+    monkeypatch.setattr(app, "set_input_device", lambda idx, label: calls.append((idx, label)))
 
-    action = app.make_device_action(app.MODE_DICTATION, 2, "USB Mic")
+    action = app.make_device_action(2, "USB Mic")
     action(None, None)
 
-    assert calls == [(app.MODE_DICTATION, 2, "USB Mic")]
+    assert calls == [(2, "USB Mic")]
 
 
 def test_menu_builders_include_expected_top_level_items(monkeypatch):
@@ -1129,7 +947,7 @@ def test_menu_builders_include_expected_top_level_items(monkeypatch):
 
     punctuation_menu = app.build_punctuation_menu()
     options_menu = app.build_options_menu()
-    monkeypatch.setattr(app, "build_device_menu", lambda role: f"device:{role}")
+    monkeypatch.setattr(app, "build_input_device_menu", lambda: "device")
     monkeypatch.setattr(app, "build_options_menu", lambda: "options")
     monkeypatch.setattr(app, "build_punctuation_menu", lambda: "punctuation")
     menu = app.build_menu()
@@ -1154,14 +972,10 @@ def test_menu_builders_include_expected_top_level_items(monkeypatch):
         f"Dictation hotkey: {app.dictation_hotkey_summary()}",
         f"Work log hotkey: {app.HOTKEY_WORKLOG}",
         "Set Hotkey...",
-        "Use Three-Finger Touchpad Press",
-        "Default (no frills)",
-        "Bells and whistles",
         "Options",
         "Transcription engine",
         "Punctuation",
-        "Dictation input device",
-        "Work log input device",
+        "Input device",
         "Refresh audio devices",
         "Open transcript history",
         "Restart",
@@ -1169,26 +983,12 @@ def test_menu_builders_include_expected_top_level_items(monkeypatch):
     ]
 
 
-def test_build_device_menu_includes_default_devices_and_worklog_toggle():
+def test_build_input_device_menu_includes_default_and_listed_devices():
     app.DEVICE_LIST = [(2, "USB Mic")]
 
-    dictation_menu = app.build_device_menu(app.MODE_DICTATION)
-    worklog_menu = app.build_device_menu(app.MODE_WORKLOG)
+    device_menu = app.build_input_device_menu()
 
-    assert [item.text for item in dictation_menu] == [app.DEFAULT_DEVICE_LABEL, "USB Mic"]
-    assert [item.text for item in worklog_menu] == [
-        "Toggle Stereo Mix (work log)",
-        app.DEFAULT_DEVICE_LABEL,
-        "USB Mic",
-    ]
-
-
-def test_console_is_foreground_checks_window_handles(monkeypatch):
-    monkeypatch.setattr(app, "supports_foreground_console_detection", lambda: True)
-    monkeypatch.setattr(app, "USER32", SimpleNamespace(GetForegroundWindow=lambda: 10))
-    monkeypatch.setattr(app, "KERNEL32", SimpleNamespace(GetConsoleWindow=lambda: 10))
-
-    assert app.console_is_foreground() is True
+    assert [item.text for item in device_menu] == [app.DEFAULT_DEVICE_LABEL, "USB Mic"]
 
 
 def test_get_key_name_supports_keycode_and_named_keys():
@@ -1325,17 +1125,6 @@ def test_main_handles_keyboard_interrupt_by_exiting_tray(monkeypatch):
     app.main()
 
     assert calls == ["\nExiting...", "listener-stop", "stop", "listener-stop"]
-
-
-def test_use_touchpad_hotkey_sets_mouse_hotkey(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        app, "set_dictation_hotkey", lambda kind, tokens=(): calls.append((kind, tokens))
-    )
-
-    app.use_touchpad_hotkey()
-
-    assert calls == [(app.HOTKEY_KIND_MOUSE, ())]
 
 
 def test_prompt_for_hotkey_accepts_tokens(monkeypatch, tmp_path: Path):
